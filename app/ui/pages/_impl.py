@@ -4274,6 +4274,67 @@ class SettingsPage(FeaturePage):
                 self.log(f"设置: 一键副控保存队内控失败: {e}")
         self._apply_task_role_ui(role, register=True, apply_cloud=False)
 
+    def _demote_other_masters(self) -> None:
+        """Make the saved master role exclusive among local feature windows.
+
+        Hub.set_role demotes stale registrations when this window finally
+        registers, but it cannot update the other window's settings page or
+        per-role control file. Call that UI path first so selection and disk
+        stay aligned instead of leaving another window displayed as 主控.
+        """
+        self_pid = int(getattr(self, "_fixed_pid", 0) or 0)
+        try:
+            wins = self._find_shell_feature_wins()
+        except Exception as exc:
+            self.log(f"设置: 排他主控检查失败: {exc}")
+            return
+
+        for raw_pid, win in list(wins.items()):
+            try:
+                pid = int(raw_pid)
+            except Exception:
+                continue
+            if not pid or pid == self_pid or win is None:
+                continue
+
+            pages = getattr(win, "_pages", None)
+            settings_page = pages.get("settings") if isinstance(pages, dict) else None
+            source = settings_page if settings_page is not None else win
+            settings = getattr(source, "settings", None)
+            role = str((settings or {}).get("task_control_role", ROLE_NONE)).lower()
+            if role != ROLE_MASTER:
+                continue
+
+            try:
+                applied = False
+                if hasattr(win, "apply_external_task_role"):
+                    try:
+                        applied = bool(win.apply_external_task_role(ROLE_NONE, team=None))
+                    except TypeError:
+                        applied = bool(win.apply_external_task_role(ROLE_NONE))
+                if (
+                    not applied
+                    and settings_page is not None
+                    and hasattr(settings_page, "apply_role_from_external")
+                ):
+                    try:
+                        settings_page.apply_role_from_external(ROLE_NONE, team=None)
+                    except TypeError:
+                        settings_page.apply_role_from_external(ROLE_NONE)
+                    applied = True
+                if not applied:
+                    if isinstance(settings, dict):
+                        settings["task_control_role"] = ROLE_NONE
+                    get_task_sync_hub().set_role(pid, ROLE_NONE)
+                    task_page = pages.get("task") if isinstance(pages, dict) else None
+                    if task_page is not None and hasattr(task_page, "_bind_task_sync"):
+                        task_page._bind_task_sync()
+                    applied = True
+                if applied:
+                    self.log(f"设置: 排他主控已降级 pid={pid} → none")
+            except Exception as exc:
+                self.log(f"设置: 排他主控降级失败 pid={pid}: {exc}")
+
     def _find_shell_feature_wins(self) -> dict[int, object]:
         """Locate ShellApp._feature_wins (pid -> SessionFeatureWindow). @author by ak"""
         try:

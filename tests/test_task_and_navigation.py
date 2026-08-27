@@ -91,6 +91,47 @@ class TaskAndNavigationTests(unittest.TestCase):
             ROLE_MASTER, register=True, apply_cloud=False
         )
 
+    def test_exclusive_save_demotes_only_other_master_windows(self) -> None:
+        from app.core.task_sync import ROLE_MASTER, ROLE_NONE, ROLE_SLAVE
+        from app.ui.pages._impl import SettingsPage
+
+        master_page = SimpleNamespace(
+            settings={"task_control_role": ROLE_MASTER}
+        )
+        master_win = SimpleNamespace(
+            _pages={"settings": master_page},
+            apply_external_task_role=MagicMock(return_value=True),
+        )
+        slave_page = SimpleNamespace(
+            settings={"task_control_role": ROLE_SLAVE},
+            apply_role_from_external=MagicMock(),
+        )
+        stale_page = SimpleNamespace(
+            settings={"task_control_role": ROLE_MASTER},
+            apply_role_from_external=MagicMock(),
+        )
+        stale_win = SimpleNamespace(_pages={"settings": stale_page})
+        page = SimpleNamespace(
+            _fixed_pid=100,
+            _find_shell_feature_wins=lambda: {
+                100: SimpleNamespace(),
+                200: master_win,
+                300: SimpleNamespace(_pages={"settings": slave_page}),
+                400: stale_win,
+            },
+            log=MagicMock(),
+        )
+
+        SettingsPage._demote_other_masters(page)
+
+        master_win.apply_external_task_role.assert_called_once_with(
+            ROLE_NONE, team=None
+        )
+        slave_page.apply_role_from_external.assert_not_called()
+        stale_page.apply_role_from_external.assert_called_once_with(
+            ROLE_NONE, team=None
+        )
+
     def test_hydrated_control_role_updates_save_variable(self) -> None:
         from app.core.task_sync import ROLE_MASTER
         from app.ui.pages._impl import SettingsPage
