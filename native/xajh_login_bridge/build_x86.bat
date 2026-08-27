@@ -12,6 +12,7 @@ if errorlevel 1 exit /b 1
 
 set ROOT=%~dp0..\..
 set OUT=%ROOT%\native\bin
+if defined XAJH_NATIVE_BIN_DIR set OUT=%XAJH_NATIVE_BIN_DIR%
 set BUILD=%ROOT%\build\native_login
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%BUILD%" mkdir "%BUILD%"

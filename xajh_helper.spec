@@ -4,6 +4,7 @@
 # @author by ak
 
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -12,6 +13,7 @@ from app.core.bridge_protocol import BRIDGE_BUILD_ID
 
 block_cipher = None
 ROOT = Path(SPECPATH).resolve()
+PYTHON_ROOT = Path(sys.prefix).resolve()
 NATIVE_BIN_SOURCE = Path(
     os.environ.get("XAJH_NATIVE_BIN_DIR") or ROOT / "native" / "bin"
 ).resolve()
@@ -55,6 +57,20 @@ datas += pystray_datas + pil_datas
 
 binaries = pystray_binaries + pil_binaries
 
+# Some embedded/pyenv Python installations are not detected by PyInstaller's
+# Tk probe. Ship the standard Tk runtime explicitly so the frozen GUI starts
+# on a clean production machine.
+TKINTER_ROOT = PYTHON_ROOT / "Lib" / "tkinter"
+TK_DLL_ROOT = PYTHON_ROOT / "DLLs"
+TK_RUNTIME_ROOT = PYTHON_ROOT / "tcl"
+if TKINTER_ROOT.exists():
+    datas.append((str(TKINTER_ROOT), "tkinter"))
+if TK_RUNTIME_ROOT.exists():
+    datas.append((str(TK_RUNTIME_ROOT), "tcl"))
+for tk_binary in (TK_DLL_ROOT / "_tkinter.pyd", TK_DLL_ROOT / "tcl86t.dll", TK_DLL_ROOT / "tk86t.dll"):
+    if tk_binary.exists():
+        binaries.append((str(tk_binary), "."))
+
 hiddenimports = sorted(
     set(
         [
@@ -87,6 +103,9 @@ hiddenimports = sorted(
             "tkinter",
             "tkinter.ttk",
             "tkinter.messagebox",
+            "tkinter.filedialog",
+            "tkinter.font",
+            "_tkinter",
         ]
         + pystray_hidden
         + pil_hidden

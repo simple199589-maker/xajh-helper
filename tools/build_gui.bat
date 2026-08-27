@@ -26,6 +26,11 @@ if defined XAJH_PKG_VERSION if not "%XAJH_PKG_VERSION%"=="" set "PKG_DIR=xajh_he
 set "XAJH_PKG_DIR=%PKG_DIR%"
 echo pkg_dir=%PKG_DIR%
 
+REM Remove stale native outputs before rebuilding so no old DLL/EXE can leak
+REM into the staging directory or be mistaken for the current build.
+if exist "%CD%\build\native" del /Q "%CD%\build\native\*.dll" "%CD%\build\native\*.exe" "%CD%\build\native\*.obj" >nul 2>&1
+if exist "%CD%\build\native_login" del /Q "%CD%\build\native_login\*.dll" "%CD%\build\native_login\*.exe" "%CD%\build\native_login\*.obj" >nul 2>&1
+
 set "XAJH_BUILD_PROFILE_PATH=%CD%\build\generated\app\data\build_profile.json"
 set "XAJH_NATIVE_BIN_DIR=%CD%\build\native"
 if not exist "%XAJH_NATIVE_BIN_DIR%" mkdir "%XAJH_NATIVE_BIN_DIR%"
@@ -44,32 +49,30 @@ if errorlevel 1 (
   echo native bridge build failed
   exit /b 1
 )
-copy /Y "native\bin\xajh_chat_tap.dll" "%XAJH_NATIVE_BIN_DIR%\xajh_chat_tap.dll" >nul
+for /f "delims=" %%I in ('python -c "from app.core.bridge_protocol import BRIDGE_BUILD_ID; print(BRIDGE_BUILD_ID)"') do set "BRIDGE_BUILD_ID=%%I"
+if not defined BRIDGE_BUILD_ID (
+  echo failed to resolve BRIDGE_BUILD_ID
+  exit /b 1
+)
+call "native\xajh_chat_tap\build_x86.bat"
 if errorlevel 1 (
-  echo failed to stage native\bin\xajh_chat_tap.dll
+  echo native chat tap build failed
+  exit /b 1
+)
+call "native\xajh_login_bridge\build_x86.bat"
+if errorlevel 1 (
+  echo native login bridge build failed
+  exit /b 1
+)
+call "native\dummy_damage_reader\build_x86.bat"
+if errorlevel 1 (
+  echo native dummy damage reader build failed
   exit /b 1
 )
 copy /Y "native\bin\xajh_team_tap.dll" "%XAJH_NATIVE_BIN_DIR%\xajh_team_tap.dll" >nul
 if errorlevel 1 (
-  echo failed to stage native\bin\xajh_team_tap.dll
+  echo failed to stage rebuilt native components
   exit /b 1
-)
-copy /Y "native\bin\xajh_login_bridge_v2.dll" "%XAJH_NATIVE_BIN_DIR%\xajh_login_bridge_v2.dll" >nul
-if errorlevel 1 (
-  echo failed to stage native\bin\xajh_login_bridge_v2.dll
-  exit /b 1
-)
-copy /Y "native\bin\xajh_login_inject.exe" "%XAJH_NATIVE_BIN_DIR%\xajh_login_inject.exe" >nul
-if errorlevel 1 (
-  echo failed to stage native\bin\xajh_login_inject.exe
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\dummy_damage_reader.exe" (
-  call "native\dummy_damage_reader\build_x86.bat"
-  if errorlevel 1 (
-    echo native dummy damage reader build failed
-    exit /b 1
-  )
 )
 if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_bridge.dll" (
   echo missing %XAJH_NATIVE_BIN_DIR%\xajh_bridge.dll
