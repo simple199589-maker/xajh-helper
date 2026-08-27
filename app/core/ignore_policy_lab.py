@@ -372,12 +372,9 @@ def object_template_id(session, obj_ptr: int) -> int:
     if not ptr:
         return 0
     try:
-        from app.core.plg_objects import _resolve_va
-        from app.core.plg_exports import EXPORT_GET_OBJECT_TID
+        from app.core.plg_objects import read_object_template_id
 
-        pid = int(getattr(session, "pid", 0) or 0)
-        va = _resolve_va(session, EXPORT_GET_OBJECT_TID)
-        return int(remote_call_cdecl_x86(pid, va, [ptr], timeout_ms=2500)) & 0xFFFFFFFF
+        return int(read_object_template_id(session, ptr) or 0) & 0xFFFFFFFF
     except Exception:
         return 0
 

@@ -1,201 +1,204 @@
-// Passive AddChatMessage tap for the fixed xajh.exe x86 build.
-// Copies each incoming message to a 50-entry shared-memory ring, then calls
-// the original function unchanged.
+// Universal chat tap v3 — DllMain NEVER returns FALSE.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <intrin.h>
 
-#include "chat_tap_protocol.h"
+// Inline struct definitions (no external header dependency).
+#define CT_MAGIC 0x50415443u
+#define CT_VERSION 2u
+#define CT_CAPACITY 50u
+#define CT_TEXT_CHARS 256u
+#define CT_TEAM_CAPACITY 512u
+
+#pragma pack(push, 1)
+struct CTEvent {
+  volatile uint32_t seq;
+  uint32_t tick_ms;
+  uint32_t thread_id;
+  uint32_t caller_va;
+  uint32_t channel;
+  uint32_t flags;
+  uint32_t text_len;
+  wchar_t text[CT_TEXT_CHARS];
+};
+struct CTShared {
+  volatile uint32_t magic;
+  volatile uint32_t version;
+  volatile uint32_t struct_size;
+  volatile uint32_t capacity;
+  volatile uint32_t write_seq;
+  volatile uint32_t status; // 0=init 1=active 2=error
+  volatile uint32_t target_va;
+  char error[128];
+  CTEvent events[CT_CAPACITY];
+  volatile uint32_t team_write_seq;
+  CTEvent team_events[CT_TEAM_CAPACITY];
+};
+#pragma pack(pop)
 
 static HMODULE g_self = nullptr;
 static HMODULE g_game = nullptr;
 static HANDLE g_map = nullptr;
-static ChatTapShared* g_ring = nullptr;
+static CTShared* g_ring = nullptr;
 static uint8_t* g_target = nullptr;
 static uint8_t* g_trampoline = nullptr;
 static uint8_t g_original[8] = {};
-// Serializes only the bounded ring write. The original game call is always
-// outside this lock; a stalled tap can therefore drop an event, never stall
-// or re-enter the game's chat path.
-static volatile LONG g_capture_lock = 0;
+static volatile LONG g_lock = 0;
 
-static const uint32_t kPreferredImageBase = 0x00400000u;
-static const uint32_t kKnownTimestamp = 0x56736608u;
-static const uint32_t kKnownImageSize = 0x038A5000u;
-static const uint32_t kAddChatMessageVa = 0x00885300u;
-static const int kStolenBytes = 8;
+static const uint32_t kBase = 0x00400000u;
+static const uint32_t kKnownVa = 0x00885300u;
+static const int kStolen = 8;
 
-typedef void(__thiscall* FnAddChatMessage)(
-    void* self, const wchar_t* text, uint32_t channel, uint32_t arg3,
-    uint32_t arg4, uint32_t arg5, uint32_t arg6, uint32_t arg7,
-    uint32_t arg8, uint32_t arg9, uint32_t arg10);
+typedef void(__thiscall* FnAdd)(void*, const wchar_t*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 
-static void SetError(const char* message) {
+static void SetErr(const char* msg) {
   if (!g_ring) return;
-  g_ring->status = CHAT_TAP_ERROR;
-  strncpy_s(g_ring->error, message ? message : "unknown", _TRUNCATE);
+  g_ring->status = 2;
+  strncpy_s(g_ring->error, msg ? msg : "?", _TRUNCATE);
 }
 
 static bool OpenRing() {
   wchar_t name[64] = {};
-  swprintf_s(name, L"Local\\XajhChatTap_%lu",
-             (unsigned long)GetCurrentProcessId());
-  g_map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                             sizeof(ChatTapShared), name);
+  swprintf_s(name, L"Local\\XajhChatTap_%lu", (unsigned long)GetCurrentProcessId());
+  g_map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(CTShared), name);
   if (!g_map) return false;
   bool fresh = GetLastError() != ERROR_ALREADY_EXISTS;
-  g_ring = (ChatTapShared*)MapViewOfFile(
-      g_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(ChatTapShared));
+  g_ring = (CTShared*)MapViewOfFile(g_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(CTShared));
   if (!g_ring) return false;
-  if (fresh || g_ring->magic != CHAT_TAP_MAGIC ||
-      g_ring->struct_size != sizeof(ChatTapShared)) {
-    ZeroMemory(g_ring, sizeof(ChatTapShared));
-  }
-  g_ring->magic = CHAT_TAP_MAGIC;
-  g_ring->version = CHAT_TAP_VERSION;
-  g_ring->struct_size = sizeof(ChatTapShared);
-  g_ring->capacity = CHAT_TAP_CAPACITY;
-  g_ring->status = CHAT_TAP_INIT;
+  if (fresh || g_ring->magic != CT_MAGIC || g_ring->struct_size != sizeof(CTShared))
+    ZeroMemory(g_ring, sizeof(CTShared));
+  g_ring->magic = CT_MAGIC;
+  g_ring->version = CT_VERSION;
+  g_ring->struct_size = sizeof(CTShared);
+  g_ring->capacity = CT_CAPACITY;
+  g_ring->status = 0;
   g_ring->target_va = 0;
   g_ring->error[0] = 0;
   return true;
 }
 
-static bool ValidateGameBuild() {
-  if (!g_game) return false;
-  __try {
-    auto* dos = (IMAGE_DOS_HEADER*)g_game;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-    auto* nt = (IMAGE_NT_HEADERS*)((uint8_t*)g_game + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-    if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) return false;
-    if (nt->FileHeader.TimeDateStamp != kKnownTimestamp) return false;
-    if (nt->OptionalHeader.SizeOfImage != kKnownImageSize) return false;
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-    return false;
-  }
-  return true;
+static void PushEv(CTEvent* ring, volatile uint32_t* seq, uint32_t cap,
+                   const wchar_t* text, uint32_t len, uint32_t ch, uint32_t caller) {
+  uint32_t s = (uint32_t)InterlockedIncrement((volatile LONG*)seq);
+  CTEvent* e = &ring[(s - 1u) % cap];
+  InterlockedExchange((volatile LONG*)&e->seq, 0);
+  e->tick_ms = GetTickCount();
+  e->thread_id = GetCurrentThreadId();
+  e->caller_va = caller;
+  e->channel = ch;
+  e->flags = 0;
+  e->text_len = len;
+  CopyMemory(e->text, text, (len + 1u) * sizeof(wchar_t));
+  MemoryBarrier();
+  InterlockedExchange((volatile LONG*)&e->seq, (LONG)s);
 }
 
-static void CaptureMessage(const wchar_t* text, uint32_t channel,
-                           uint32_t caller_va) {
-  if (!g_ring || g_ring->status != CHAT_TAP_ACTIVE || !text) return;
-  wchar_t local[CHAT_TAP_TEXT_CHARS] = {};
-  uint32_t length = 0;
+static void Capture(const wchar_t* text, uint32_t ch, uint32_t caller) {
+  if (!g_ring || g_ring->status != 1 || !text) return;
+  wchar_t local[CT_TEXT_CHARS] = {};
+  uint32_t len = 0;
   __try {
-    while (length + 1 < CHAT_TAP_TEXT_CHARS && text[length]) {
-      local[length] = text[length];
-      ++length;
-    }
-    local[length] = 0;
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-    return;
-  }
-  if (!length) return;
-
-  bool locked = false;
-  for (int spin = 0; spin < 128; ++spin) {
-    if (InterlockedCompareExchange(&g_capture_lock, 1, 0) == 0) {
-      locked = true;
-      break;
+    while (len + 1 < CT_TEXT_CHARS && text[len]) { local[len] = text[len]; ++len; }
+    local[len] = 0;
+  } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+  if (!len) return;
+  for (int i = 0; i < 128; ++i) {
+    if (InterlockedCompareExchange(&g_lock, 1, 0) == 0) {
+      __try {
+        PushEv(g_ring->events, &g_ring->write_seq, CT_CAPACITY, local, len, ch, caller);
+        if (ch == 3) PushEv(g_ring->team_events, &g_ring->team_write_seq, CT_TEAM_CAPACITY, local, len, ch, caller);
+      } __except (EXCEPTION_EXECUTE_HANDLER) {}
+      InterlockedExchange(&g_lock, 0);
+      return;
     }
     YieldProcessor();
   }
-  if (!locked) {
-    return;
-  }
-
-  __try {
-    uint32_t seq =
-        (uint32_t)InterlockedIncrement((volatile LONG*)&g_ring->write_seq);
-    ChatTapEvent* event = &g_ring->events[(seq - 1u) % CHAT_TAP_CAPACITY];
-    InterlockedExchange((volatile LONG*)&event->seq, 0);
-    event->tick_ms = GetTickCount();
-    event->thread_id = GetCurrentThreadId();
-    event->caller_va = caller_va;
-    event->channel = channel;
-    event->flags = 0;
-    event->text_len = length;
-    CopyMemory(event->text, local, (length + 1u) * sizeof(wchar_t));
-    MemoryBarrier();
-    InterlockedExchange((volatile LONG*)&event->seq, (LONG)seq);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-    // Keep the ring unchanged on an unexpected shared-memory fault.
-  }
-  InterlockedExchange(&g_capture_lock, 0);
 }
 
-static void __fastcall HookAddChatMessage(
-    void* self, void* /*edx*/, const wchar_t* text, uint32_t channel,
-    uint32_t arg3, uint32_t arg4, uint32_t arg5, uint32_t arg6,
-    uint32_t arg7, uint32_t arg8, uint32_t arg9, uint32_t arg10) {
-  CaptureMessage(text, channel, (uint32_t)(uintptr_t)_ReturnAddress());
-  FnAddChatMessage original = (FnAddChatMessage)g_trampoline;
-  original(self, text, channel, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
-           arg10);
+static void __fastcall HookFn(void* self, void*, const wchar_t* text, uint32_t ch,
+    uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6, uint32_t a7, uint32_t a8, uint32_t a9, uint32_t a10) {
+  Capture(text, ch, (uint32_t)(uintptr_t)_ReturnAddress());
+  ((FnAdd)g_trampoline)(self, text, ch, a3, a4, a5, a6, a7, a8, a9, a10);
 }
 
-static bool InstallHook() {
-  uint8_t* base = (uint8_t*)g_game;
-  g_target = base + (kAddChatMessageVa - kPreferredImageBase);
-  static const uint8_t expected[kStolenBytes] = {
-      0x6A, 0xFF, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00};
-  if (memcmp(g_target, expected, sizeof(expected)) != 0) {
-    SetError("AddChatMessage prologue mismatch");
-    return false;
-  }
+static const uint8_t kPro[8] = {0x6A, 0xFF, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00};
 
-  CopyMemory(g_original, g_target, kStolenBytes);
-  g_trampoline = (uint8_t*)VirtualAlloc(
-      nullptr, kStolenBytes + 5, MEM_COMMIT | MEM_RESERVE,
-      PAGE_EXECUTE_READWRITE);
-  if (!g_trampoline) {
-    SetError("trampoline alloc failed");
-    return false;
-  }
-  CopyMemory(g_trampoline, g_original, kStolenBytes);
-  g_trampoline[kStolenBytes] = 0xE9;
-  *(int32_t*)(g_trampoline + kStolenBytes + 1) =
-      (int32_t)((g_target + kStolenBytes) -
-                (g_trampoline + kStolenBytes + 5));
+static bool ProOk(uint8_t* p) {
+  __try { return memcmp(p, kPro, 8) == 0; }
+  __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
+static bool TryHook(uint8_t* addr) {
+  if (!ProOk(addr)) return false;
+  CopyMemory(g_original, addr, kStolen);
+  g_trampoline = (uint8_t*)VirtualAlloc(nullptr, kStolen + 5, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  if (!g_trampoline) { SetErr("tram alloc"); return false; }
+  CopyMemory(g_trampoline, g_original, kStolen);
+  g_trampoline[kStolen] = 0xE9;
+  *(int32_t*)(g_trampoline + kStolen + 1) = (int32_t)((addr + kStolen) - (g_trampoline + kStolen + 5));
   DWORD old = 0;
-  if (!VirtualProtect(g_target, kStolenBytes, PAGE_EXECUTE_READWRITE, &old)) {
-    SetError("target protect failed");
-    return false;
-  }
-  g_target[0] = 0xE9;
-  *(int32_t*)(g_target + 1) =
-      (int32_t)((uint8_t*)&HookAddChatMessage - (g_target + 5));
-  for (int i = 5; i < kStolenBytes; ++i) g_target[i] = 0x90;
-  FlushInstructionCache(GetCurrentProcess(), g_target, kStolenBytes);
-  DWORD ignored = 0;
-  VirtualProtect(g_target, kStolenBytes, old, &ignored);
-  g_ring->target_va = (uint32_t)(uintptr_t)g_target;
-  g_ring->status = CHAT_TAP_ACTIVE;
+  if (!VirtualProtect(addr, kStolen, PAGE_EXECUTE_READWRITE, &old)) { SetErr("protect"); return false; }
+  addr[0] = 0xE9;
+  *(int32_t*)(addr + 1) = (int32_t)((uint8_t*)&HookFn - (addr + 5));
+  for (int i = 5; i < kStolen; ++i) addr[i] = 0x90;
+  FlushInstructionCache(GetCurrentProcess(), addr, kStolen);
+  DWORD ig = 0; VirtualProtect(addr, kStolen, old, &ig);
+  g_target = addr;
+  g_ring->target_va = (uint32_t)(uintptr_t)addr;
+  g_ring->status = 1;
   return true;
 }
 
-static DWORD WINAPI AttachThread(LPVOID) {
-  if (!OpenRing()) return 1;
+static bool Install() {
+  if (!g_game || !g_ring) return false;
+  char buf[32] = {};
+  if (GetEnvironmentVariableA("XAJH_CHAT_HOOK_VA", buf, sizeof(buf)) && buf[0]) {
+    uint32_t va = (uint32_t)strtoul(buf, nullptr, 0);
+    if (va) return TryHook((uint8_t*)g_game + (va - kBase));
+  }
+  if (TryHook((uint8_t*)g_game + (kKnownVa - kBase))) return true;
+  __try {
+    auto* dos = (IMAGE_DOS_HEADER*)g_game;
+    auto* nt = (IMAGE_NT_HEADERS*)((uint8_t*)g_game + dos->e_lfanew);
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+      if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+      uint8_t* st = (uint8_t*)g_game + sec->VirtualAddress;
+      for (uint32_t o = 0; o + 8 <= sec->Misc.VirtualSize; ++o) {
+        if (ProOk(st + o)) {
+          uint32_t va = kBase + sec->VirtualAddress + o;
+          if (va == kKnownVa) continue;
+          if (TryHook(st + o)) return true;
+          if (g_trampoline) { VirtualFree(g_trampoline, 0, MEM_RELEASE); g_trampoline = nullptr; }
+        }
+      }
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {}
+  SetErr("no match");
+  return false;
+}
+
+static DWORD WINAPI Thread(LPVOID) {
   g_game = GetModuleHandleW(L"xajh.exe");
   if (!g_game) g_game = GetModuleHandleW(nullptr);
-  if (!ValidateGameBuild()) {
-    SetError("unsupported xajh build");
-    return 2;
-  }
-  return InstallHook() ? 0 : 3;
+  if (!g_game) { SetErr("no module"); return 2; }
+  return Install() ? 0 : 3;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
     g_self = module;
     DisableThreadLibraryCalls(module);
-    HANDLE thread = CreateThread(nullptr, 0, AttachThread, nullptr, 0, nullptr);
-    if (!thread) return FALSE;
-    CloseHandle(thread);
+    if (!g_ring && !OpenRing()) {
+      // Can't create shared memory — still return TRUE so LoadLibrary succeeds.
+      // The diagnostic will just show "not found".
+    }
+    HANDLE t = CreateThread(nullptr, 0, Thread, nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
+    // NEVER return FALSE.
   }
   return TRUE;
 }

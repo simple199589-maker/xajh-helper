@@ -96,6 +96,9 @@ class ObjectAndInteractTests(unittest.TestCase):
             "app.core.plg_objects.remote_call_cdecl_x86", side_effect=_remote
         ), patch(
             "app.core.plg_objects.read_wstr", side_effect=_name
+        ), patch(
+            "app.core.plg_objects.read_object_template_id",
+            side_effect=lambda _session, ptr: 778899 if int(ptr) == 0x2000 else None,
         ):
             rows = list_class_objects(
                 session,
@@ -108,7 +111,73 @@ class ObjectAndInteractTests(unittest.TestCase):
             )
 
         self.assertEqual([(row.ptr, row.tid) for row in rows], [(0x2000, 778899)])
-        self.assertEqual(calls, [(0x10, 0x1000), (0x10, 0x2000), (0x20, 0x2000)])
+        self.assertEqual(calls, [(0x10, 0x1000), (0x10, 0x2000)])
+
+    def test_read_object_template_id_uses_verified_vtable_and_offset(self) -> None:
+        session = type("Session", (), {"pm": _Pm(), "module_base": 0x400000})()
+
+        def read(_pm, addr, size):
+            addr = int(addr)
+            if (addr, size) == (0x30000, 4):
+                return struct.pack("<I", 0x20000)
+            if (addr, size) == (0x20084, 4):
+                return struct.pack("<I", 0x400000 + plg_objects.PLG_OBJ_TID_FN_RVA)
+            if (addr, size) == (0x30000 + plg_objects.PLG_OBJ_TID_OFF, 4):
+                return struct.pack("<I", 0x18A98)
+            raise AssertionError((addr, size))
+
+        with patch.object(plg_objects, "_read_process_bytes", side_effect=read):
+            self.assertEqual(
+                plg_objects.read_object_template_id(session, 0x30000), 0x18A98
+            )
+
+    def test_read_object_template_id_rejects_unknown_vtable(self) -> None:
+        session = type("Session", (), {"pm": _Pm(), "module_base": 0x400000})()
+
+        def read(_pm, addr, size):
+            if (int(addr), size) == (0x30000, 4):
+                return struct.pack("<I", 0x20000)
+            if (int(addr), size) == (0x20084, 4):
+                return struct.pack("<I", 0x400000 + 0xDEAD)
+            raise AssertionError("tid field must not be read for unknown vtable")
+
+        with patch.object(plg_objects, "_read_process_bytes", side_effect=read):
+            self.assertIsNone(plg_objects.read_object_template_id(session, 0x30000))
+
+    def test_nearby_scan_uses_rpm_tid_and_never_remote_tid(self) -> None:
+        session = type("Session", (), {"pid": 9, "pm": _Pm()})()
+
+        def _reject_remote(_pid, _va, _args, timeout_ms=0):
+            raise AssertionError("GetObjectTemplateID remote call must be gone")
+
+        with patch("app.core.safe_dispatch.get_dispatch"), patch(
+            "app.core.plg_objects.get_object_count", return_value=1
+        ), patch(
+            "app.core.plg_objects.get_object_ptrs", return_value=[0x3000]
+        ), patch(
+            "app.core.plg_objects.read_object_pos",
+            return_value=(1.0, 0.0, 0.0),
+        ), patch(
+            "app.core.plg_objects.read_object_template_id",
+            return_value=99,
+        ), patch(
+            "app.core.plg_objects._resolve_va",
+            side_effect=AssertionError("name CRT was not requested"),
+        ), patch(
+            "app.core.plg_objects.remote_call_cdecl_x86",
+            side_effect=_reject_remote,
+        ):
+            rows = list_class_objects(
+                session,
+                plg_objects.CLASS_NPC,
+                host_pos=(0.0, 0.0, 0.0),
+                want_tid=99,
+                read_name=False,
+                read_tid=True,
+                max_inspect=1,
+            )
+
+        self.assertEqual([(row.ptr, row.tid) for row in rows], [(0x3000, 99)])
 
 
 if __name__ == "__main__":

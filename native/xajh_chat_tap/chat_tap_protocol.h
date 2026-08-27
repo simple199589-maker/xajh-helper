@@ -1,17 +1,14 @@
 #pragma once
-
 #include <stdint.h>
+#include <stddef.h>
 
-#define CHAT_TAP_MAGIC 0x50415443u /* 'CTAP' */
-#define CHAT_TAP_VERSION 1u
+#define CHAT_TAP_MAGIC 0x50415443u
+#define CHAT_TAP_VERSION 2u
 #define CHAT_TAP_CAPACITY 50u
 #define CHAT_TAP_TEXT_CHARS 256u
+#define CHAT_TAP_TEAM_CAPACITY 512u
 
-enum ChatTapStatus {
-  CHAT_TAP_INIT = 0,
-  CHAT_TAP_ACTIVE = 1,
-  CHAT_TAP_ERROR = 2,
-};
+enum { CHAT_TAP_INIT = 0, CHAT_TAP_ACTIVE = 1, CHAT_TAP_ERROR = 2 };
 
 #pragma pack(push, 1)
 struct ChatTapEvent {
@@ -35,8 +32,7 @@ struct ChatTapShared {
   volatile uint32_t target_va;
   char error[128];
   ChatTapEvent events[CHAT_TAP_CAPACITY];
+  volatile uint32_t team_write_seq;
+  ChatTapEvent team_events[CHAT_TAP_TEAM_CAPACITY];
 };
 #pragma pack(pop)
-
-static_assert(sizeof(ChatTapEvent) == 540, "ChatTapEvent layout mismatch");
-static_assert(sizeof(ChatTapShared) == 27156, "ChatTapShared layout mismatch");

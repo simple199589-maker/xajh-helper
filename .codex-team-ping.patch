@@ -1,0 +1,96 @@
+diff --git a/app/ui/pages/_impl.py b/app/ui/pages/_impl.py
+--- a/app/ui/pages/_impl.py
++++ b/app/ui/pages/_impl.py
+@@ -311,7 +311,9 @@ from app.core.team_chat import (
+     build_slave_jianglong_status,
+     build_slave_pong,
++    ensure_team_tap,
+     is_team_control_ready,
+     is_team_slave_isolated,
+     read_team_events_pid,
++    resolve_send_mgr,
+     send_team_message,
+     team_control_flag_enabled,
+ )
+@@ -4896,6 +4898,32 @@ class SettingsPage:
+         if not pid:
+             self.var_team_control_status.set("PING：未挂载游戏")
+             return
++        # 发送端必须先让游戏自己调用一次聊天 wrapper，tap 才能拿到 send_mgr。
++        # 注入成功/角色注册成功都不能证明发送器已可用；先做 preflight，避免
++        # PING 空耗 5 条/10s 的聊天发送窗口。
++        try:
++            tap_ok = ensure_team_tap(
++                pid,
++                log=lambda m: self.log(str(m)),
++            )
++        except Exception as exc:
++            self.log(f"队内控 [PING] tap 检查失败: {exc}")
++            tap_ok = False
++        if not tap_ok:
++            self.var_team_control_status.set("PING 未发送：team tap 未激活")
++            self.log("队内控 [PING] 未入队：team tap 未激活")
++            return
++        send_mgr = 0
++        try:
++            send_mgr = resolve_send_mgr(pid, ensure=False)
++        except Exception as exc:
++            self.log(f"队内控 [PING] 读取 send_mgr 失败: {exc}")
++        if not send_mgr:
++            hint = "发送管理器未捕获，请在游戏队伍频道手动发一条消息后重试"
++            self.var_team_control_status.set(f"PING 未发送：{hint}")
++            self.log(
++                "队内控 [PING] 未入队：send_mgr not captured "
++                "(注入成功不等于捕获成功；需一次游戏侧队伍聊天触发)"
++            )
++            return
+         text = build_master_ping()
+         res = send_team_message(
+             pid,
+diff --git a/tests/test_task_and_navigation.py b/tests/test_task_and_navigation.py
+--- a/tests/test_task_and_navigation.py
++++ b/tests/test_task_and_navigation.py
+@@ -121,6 +121,45 @@ class TaskAndNavigationTests(unittest.TestCase):
+         slave_page.apply_role_from_external.assert_not_called()
+         stale_page.apply_role_from_external.assert_called_once_with(
+             ROLE_NONE, team=None
+         )
+ 
++    def test_team_ping_preflights_uncaptured_send_manager(self) -> None:
++        from app.core.task_sync import ROLE_MASTER
++        from app.ui.pages._impl import SettingsPage
++
++        page = SimpleNamespace(
++            settings={"task_control_role": ROLE_MASTER},
++            var_task_role=SimpleNamespace(get=lambda: ROLE_MASTER),
++            var_team_control_enabled=SimpleNamespace(get=lambda: True),
++            var_team_control_status=MagicMock(),
++            _fixed_pid=12345,
++            _update_team_control_status=MagicMock(),
++            log=MagicMock(),
++        )
++
++        with patch(
++            "app.ui.pages._impl.ensure_team_tap", return_value=True
++        ) as ensure_tap, patch(
++            "app.ui.pages._impl.resolve_send_mgr", return_value=0
++        ) as resolve_mgr, patch(
++            "app.ui.pages._impl.send_team_message"
++        ) as send_message:
++            SettingsPage._on_team_ping(page)
++
++        ensure_tap.assert_called_once_with(12345, log=ANY)
++        resolve_mgr.assert_called_once_with(12345, ensure=False)
++        send_message.assert_not_called()
++        page.var_team_control_status.set.assert_any_call(
++            "PING 未发送：发送管理器未捕获，"
++            "请在游戏队伍频道手动发一条消息后重试"
++        )
++        page.log.assert_any_call(
++            "队内控 [PING] 未入队：send_mgr not captured "
++            "(注入成功不等于捕获成功；需一次游戏侧队伍聊天触发)"
++        )
++
+     def test_hydrated_control_role_updates_save_variable(self) -> None:
+         from app.core.task_sync import ROLE_MASTER
+         from app.ui.pages._impl import SettingsPage

@@ -75,6 +75,16 @@ CLASS_NPC = 2  # NPC + monster share CECNPC list
 # Live-verified float3 offset on object / host
 OBJ_POS_OFF = 0x158
 
+# 2026-08-27 live vtable evidence (pid=21744, 24/24 class-2 objects):
+#   obj->[vtbl+0x84] == image_base + 0x3B8060
+#   that getter reads u32 at obj+0x4F8.
+# Read this field with RPM instead of remotely calling plg::
+# GetObjectTemplateID: a stale AOI pointer can make that virtual call hang or
+# crash the game (0xC00000FD in the production log).
+PLG_OBJ_TID_OFF = 0x4F8
+PLG_OBJ_TID_FN_RVA = 0x3B8060
+USER_PTR_MAX = 0xFFFF0000  # WOW64 / LARGEADDRESSAWARE upper bound
+
 
 @dataclass
 class PlgObject:
@@ -256,6 +266,61 @@ def read_object_pos(pm, obj_ptr: int) -> tuple[float, float, float] | None:
     return float(x), float(y), float(z)
 
 
+def _read_process_bytes(pm, addr: int, size: int) -> bytes:
+    """Read exact bytes from another process (small helper for tests)."""
+    import pymem.memory
+
+    return pymem.memory.read_bytes(pm.process_handle, int(addr), int(size))
+
+
+def _user_addr_ok(addr: int, size: int = 1) -> bool:
+    """Reject kernel-ish/wrapped addresses but allow the client's LAA heap."""
+    addr = _u32(addr)
+    size = max(1, int(size))
+    return 0x10000 <= addr and addr + size <= USER_PTR_MAX
+
+
+def read_object_template_id(session, obj_ptr: int) -> int | None:
+    """
+    Read a live object's template id without entering the game process.
+
+    The vtable slot is checked first so arbitrary/freed memory is not mistaken
+    for a template id. Returns None when the pointer, vtable function, or RPM
+    read does not exactly match the verified client layout.
+    """
+    ptr = _u32(obj_ptr)
+    if not _user_addr_ok(ptr, 4):
+        return None
+    pm = getattr(session, "pm", None)
+    if pm is None:
+        return None
+    module_base = _u32(getattr(session, "module_base", 0) or 0x400000)
+    if not module_base:
+        return None
+    try:
+        vtbl = _u32(
+            struct.unpack("<I", _read_process_bytes(pm, ptr, 4))[0]
+        )
+        if not _user_addr_ok(vtbl, 0x88):
+            return None
+        fn = _u32(
+            struct.unpack("<I", _read_process_bytes(pm, vtbl + 0x84, 4))[0]
+        )
+        if fn < module_base:
+            return None
+        if _u32(fn - module_base) != PLG_OBJ_TID_FN_RVA:
+            return None
+        if not _user_addr_ok(ptr + PLG_OBJ_TID_OFF, 4):
+            return None
+        return int(
+            struct.unpack(
+                "<I", _read_process_bytes(pm, ptr + PLG_OBJ_TID_OFF, 4)
+            )[0]
+        )
+    except Exception:
+        return None
+
+
 def _dist3(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
     return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
 
@@ -426,7 +491,6 @@ def list_class_objects(
 
     va_name = _resolve_va(session, EXPORT_GET_OBJECT_NAME) if do_name else 0
     va_dist = _resolve_va(session, EXPORT_GET_OBJECT_DIST) if read_dist_api else 0
-    va_tid = _resolve_va(session, EXPORT_GET_OBJECT_TID) if do_tid else 0
 
     out: list[PlgObject] = []
     crt_fails = 0
@@ -447,26 +511,17 @@ def list_class_objects(
         candidate_ok = True
         for phase in phases:
             if phase == "tid" and do_tid:
-                if not va_tid:
-                    candidate_ok = False
-                    break
                 try:
-                    tid = int(
-                        remote_call_cdecl_x86(pid, va_tid, [p], timeout_ms=2500)
-                    )
-                    crt_fails = 0
+                    tid = read_object_template_id(session, p)
                 except Exception as e:
-                    crt_fails += 1
-                    if _is_crt_hard_error(e) or crt_fails >= int(max_crt_failures):
-                        log(
-                            f"GetObjectTemplateID abort after fails={crt_fails} "
-                            f"p=0x{_u32(p):X} err={e}"
-                        )
-                        if _is_crt_hard_error(e):
-                            _note_hard_error(session, e)
-                        hard_stop = True
+                    log(f"GetObjectTemplateID RPM fail p=0x{_u32(p):X} err={e}")
+                    tid = None
+                if tid is None:
+                    # Unknown vtable or stale/freed pointer: skip it. Never
+                    # fall back to a remote virtual call on AOI memory.
                     candidate_ok = False
                     break
+                tid = _u32(tid)
                 if want_tid is not None and int(tid) != int(want_tid):
                     candidate_ok = False
                     break

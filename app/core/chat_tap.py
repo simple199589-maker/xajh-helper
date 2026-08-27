@@ -29,7 +29,7 @@ CHAT_TAP_ERROR = 2
 _HEADER = struct.Struct("<7I128s")
 _EVENT_META = struct.Struct("<7I")
 
-FILE_MAP_READ = 0x0004
+FILE_MAP_READ = 0x0006
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.OpenFileMappingW.argtypes = [
@@ -320,3 +320,4 @@ def ensure_chat_tap(
         return ok
     finally:
         reader.close()
+
