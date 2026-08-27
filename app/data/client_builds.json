@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "builds": [
+    {
+      "id": "xajh-2026-07-17-wegame-x86",
+      "sha256": "21A8BC0406181655EE0C097AC73C3C39CF1DC8E91FEB6B84DF352B300CF6CAB9",
+      "size": 19067486,
+      "machine": "0x014C",
+      "timestamp": "0x56736608",
+      "image_base": "0x00400000",
+      "image_size": "0x038A5000",
+      "verified_at": "2026-07-17",
+      "capabilities": [
+        "scene.read",
+        "object.read",
+        "target.set",
+        "matter.interact",
+        "package.read",
+        "package.use",
+        "item.use.trace",
+        "damage.stat",
+        "package.money",
+        "package.sell",
+        "task.read",
+        "task.accept.live",
+        "task.complete.live",
+        "activity.read",
+        "activity.ui",
+        "instance.action",
+        "line.action",
+        "move.action",
+        "ui.action",
+        "session.cancel",
+        "skill.probe"
+      ],
+      "symbols": {
+        "choice_object": {
+          "rva": "0x48F2A0",
+          "status": "verified"
+        },
+        "pickup_matter": {
+          "rva": "0x3267F0",
+          "status": "experimental"
+        },
+        "matter_interact": {
+          "rva": "0x3496B0",
+          "status": "verified"
+        },
+        "task_accept": {
+          "rva": "0x8F0550",
+          "status": "experimental"
+        },
+        "task_complete": {
+          "rva": "0x6B9B40",
+          "status": "experimental"
+        },
+        "task_list_accepted": {
+          "rva": "0x093360",
+          "status": "verified"
+        },
+        "task_iface_helper": {
+          "rva": "0x0AE420",
+          "status": "verified"
+        },
+        "get_money_by_pkg": {
+          "rva": "0x32AF50",
+          "status": "verified"
+        },
+        "sell_from_package": {
+          "rva": "0x3491F0",
+          "status": "verified"
+        },
+        "cancel_session": {
+          "rva": "0x8C7010",
+          "status": "verified"
+        },
+        "game_root_global": {
+          "rva": "0x11282D8",
+          "status": "verified"
+        },
+        "split_damage_process": {
+          "rva": "0x39BA80",
+          "status": "experimental"
+        },
+        "skill_cast_note": {
+          "rva": "0x355F10",
+          "status": "stale",
+          "reason": "community note address is in the middle of the current function"
+        },
+        "skill_cd_note": {
+          "rva": "0x356F20",
+          "status": "stale",
+          "reason": "community note address is not a callable entry on this build"
+        }
+      },
+      "note": "Stock WeGame x86 build (unpatched multi-open)."
+    },
+    {
+      "id": "xajh-2026-07-21-wegame-x86-multiopen",
+      "sha256": "CF586049E9274A4CE18898A876C0C077956B75523A510BC3A66E394BFDE491FA",
+      "size": 19067486,
+      "machine": "0x014C",
+      "timestamp": "0x56736608",
+      "image_base": "0x00400000",
+      "image_size": "0x038A5000",
+      "verified_at": "2026-07-21",
+      "capabilities": [
+        "scene.read",
+        "object.read",
+        "target.set",
+        "matter.interact",
+        "package.read",
+        "package.use",
+        "item.use.trace",
+        "damage.stat",
+        "package.money",
+        "package.sell",
+        "task.read",
+        "task.accept.live",
+        "task.complete.live",
+        "activity.read",
+        "activity.ui",
+        "instance.action",
+        "line.action",
+        "move.action",
+        "ui.action",
+        "session.cancel",
+        "skill.probe"
+      ],
+      "symbols": {
+        "choice_object": {
+          "rva": "0x48F2A0",
+          "status": "verified"
+        },
+        "pickup_matter": {
+          "rva": "0x3267F0",
+          "status": "experimental"
+        },
+        "matter_interact": {
+          "rva": "0x3496B0",
+          "status": "verified"
+        },
+        "task_accept": {
+          "rva": "0x8F0550",
+          "status": "experimental"
+        },
+        "task_complete": {
+          "rva": "0x6B9B40",
+          "status": "experimental"
+        },
+        "task_list_accepted": {
+          "rva": "0x093360",
+          "status": "verified"
+        },
+        "task_iface_helper": {
+          "rva": "0x0AE420",
+          "status": "verified"
+        },
+        "get_money_by_pkg": {
+          "rva": "0x32AF50",
+          "status": "verified"
+        },
+        "sell_from_package": {
+          "rva": "0x3491F0",
+          "status": "verified"
+        },
+        "cancel_session": {
+          "rva": "0x8C7010",
+          "status": "verified"
+        },
+        "game_root_global": {
+          "rva": "0x11282D8",
+          "status": "verified"
+        },
+        "split_damage_process": {
+          "rva": "0x39BA80",
+          "status": "experimental"
+        },
+        "skill_cast_note": {
+          "rva": "0x355F10",
+          "status": "stale",
+          "reason": "community note address is in the middle of the current function"
+        },
+        "skill_cd_note": {
+          "rva": "0x356F20",
+          "status": "stale",
+          "reason": "community note address is not a callable entry on this build"
+        }
+      },
+      "note": "Same build after file multi-open patch (5-byte jmp). Hash differs; RVAs unchanged."
+    }
+  ]
+}

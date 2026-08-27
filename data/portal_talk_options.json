@@ -1,0 +1,207 @@
+{
+  "100219": {
+    "host": [
+      {
+        "index": 8,
+        "opt_id": 1047399842,
+        "label": "传送",
+        "kind": "entry",
+        "sub_count": 0,
+        "texts": [
+          "传送"
+        ],
+        "sub_texts": []
+      }
+    ],
+    "layer2": [
+      {
+        "index": 0,
+        "opt_id": 0,
+        "label": "西王母宫上层",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "西王母宫上层"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      },
+      {
+        "index": 1,
+        "opt_id": 0,
+        "label": "西王母宫深处",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "西王母宫深处"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ],
+    "layer1": [
+      {
+        "index": 1,
+        "opt_id": 84973,
+        "label": "初级地宫传送",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "初级地宫传送"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ]
+  },
+  "100218": {
+    "layer1": [
+      {
+        "index": 0,
+        "opt_id": 3232484847,
+        "label": "<每日杀怪>中级地宫杀怪",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "<每日杀怪>中级地宫杀怪"
+        ],
+        "sub_texts": [],
+        "is_magic": true
+      },
+      {
+        "index": 1,
+        "opt_id": 62491,
+        "label": "中级地宫传送",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "中级地宫传送"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ],
+    "layer2": [
+      {
+        "index": 0,
+        "opt_id": 0,
+        "label": "上层",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "上层"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      },
+      {
+        "index": 1,
+        "opt_id": 0,
+        "label": "深处",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "深处"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ]
+  },
+  "100220": {
+    "layer1": [
+      {
+        "index": 0,
+        "opt_id": 3232484847,
+        "label": "<每日杀怪>高级地宫杀怪",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "<每日杀怪>高级地宫杀怪"
+        ],
+        "sub_texts": [],
+        "is_magic": true
+      },
+      {
+        "index": 1,
+        "opt_id": 76131,
+        "label": "高级地宫传送",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "高级地宫传送"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ],
+    "layer2": [
+      {
+        "index": 0,
+        "opt_id": 0,
+        "label": "上层",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "上层"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      },
+      {
+        "index": 1,
+        "opt_id": 0,
+        "label": "深处",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "深处"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ]
+  },
+  "100221": {
+    "layer2": [
+      {
+        "index": 0,
+        "opt_id": 0,
+        "label": "上层",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "上层"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      },
+      {
+        "index": 1,
+        "opt_id": 0,
+        "label": "深处",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "深处"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ],
+    "host": [
+      {
+        "index": 0,
+        "opt_id": 0,
+        "label": "上层",
+        "kind": "host",
+        "sub_count": 0,
+        "texts": [
+          "上层"
+        ],
+        "sub_texts": [],
+        "is_magic": false
+      }
+    ]
+  }
+}
