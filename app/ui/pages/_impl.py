@@ -6300,9 +6300,27 @@ class SettingsPage(FeaturePage):
         """Reload the blacklist (tid rules) into the tree. @author by ak"""
         try:
             cid = self._ignore_char_id()
+            from app.core.dungeon_target_policy import (
+                PACKAGED_DUNGEON_TARGET_RULES,
+            )
             from app.core.ignore_rules import load_char_rules
 
-            rules = load_char_rules(cid)
+            # Packaged baseline (北疆疯丐 / 上官霸刀) is always shipped in the
+            # frozen release; show it read-only above the per-role rules so
+            # users can see what the dungeon guard actually carries.
+            packaged: list[dict] = [
+                {
+                    "tid": int(tid),
+                    "name": f"{name}(内置)",
+                    "added_at": 0.0,
+                    "packaged": True,
+                }
+                for tid, name in PACKAGED_DUNGEON_TARGET_RULES
+            ]
+            dynamic = load_char_rules(cid)
+            for row in dynamic:
+                row["packaged"] = False
+            rules = packaged + dynamic
             self.ignore_tree.delete(*self.ignore_tree.get_children())
             self._ignore_rows = rules
             for rule in rules:
@@ -6378,6 +6396,9 @@ class SettingsPage(FeaturePage):
         tid = int(row.get("tid") or 0)
         if not tid:
             self.var_ignore_status.set("删除失败：该行无 tid")
+            return
+        if bool(row.get("packaged")):
+            self.var_ignore_status.set("内置目标不可删除")
             return
         cid = self._ignore_char_id()
         from app.core.ignore_rules import remove_char_rule

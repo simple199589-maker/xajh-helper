@@ -528,58 +528,58 @@ def scan_map_strings(pm, log: LogFn | None = None, limit: int = 12) -> list[MapC
     return out
 
 
-def _iter_readable_regions(pm, max_regions: int = 400):
+# xajh.exe carries IMAGE_FILE_LARGE_ADDRESS_AWARE: its 32-bit user space can
+# reach ~4 GB on x64 Windows and live heaps (e.g. fly_mgr=0x82990038) may sit
+# past the classic 2 GB line. Region iteration is split in two phases so the
+# cheap classic-low walk stays first and the high window is only entered while
+# the caller's quota still allows it.
+REGION_LIMIT_CLASSIC = 0x7FFF0000
+REGION_LIMIT_FULL = 0xFFFF0000
+
+
+def _iter_regions_pm(pm, max_regions, hit_mask, mask_name):
     import pymem.memory
 
-    address = 0
-    count = 0
-    # xajh.exe is 32-bit; stay within classic user space
-    limit = 0x7FFF0000
-    while address < limit and count < max_regions:
-        try:
-            mbi = pymem.memory.virtual_query(pm.process_handle, address)
-        except Exception:
-            break
-        size = int(getattr(mbi, "RegionSize", 0) or 0x1000)
-        protect = int(getattr(mbi, "Protect", 0) or 0)
-        state = int(getattr(mbi, "State", 0) or 0)
-        base = int(getattr(mbi, "BaseAddress", address) or address)
-        # MEM_COMMIT = 0x1000
-        if state == 0x1000 and size > 0:
-            # readable-ish protections; skip PAGE_NOACCESS/PAGE_GUARD
-            if protect & 0xEE and not (protect & 0x101):
-                yield base, size
-                count += 1
-        nxt = base + size
-        if nxt <= address:
-            break
-        address = nxt
+    remaining = int(max_regions)
+    for lo, hi in (
+        (0x10000, REGION_LIMIT_CLASSIC),
+        (REGION_LIMIT_CLASSIC, REGION_LIMIT_FULL),
+    ):
+        if remaining <= 0:
+            return
+        address = lo
+        while address < hi and remaining > 0:
+            try:
+                mbi = pymem.memory.virtual_query(pm.process_handle, address)
+            except Exception:
+                break
+            size = int(getattr(mbi, "RegionSize", 0) or 0x1000)
+            protect = int(getattr(mbi, "Protect", 0) or 0)
+            state = int(getattr(mbi, "State", 0) or 0)
+            base = int(getattr(mbi, "BaseAddress", address) or address)
+            nxt = base + size
+            if nxt <= address or nxt > REGION_LIMIT_FULL:
+                break
+            # MEM_COMMIT = 0x1000
+            if state == 0x1000 and size > 0:
+                if protect & hit_mask and not (protect & 0x101):
+                    yield base, size
+                    remaining -= 1
+            address = nxt
+
+
+def _iter_readable_regions(pm, max_regions: int = 400):
+    """Yield readable regions: classic heap first, then LAA high window."""
+    # readable-ish protections; skip PAGE_NOACCESS/PAGE_GUARD
+    yield from _iter_regions_pm(pm, max_regions, 0xEE, "readable")
+
+
 
 
 def _iter_writable_regions(pm, max_regions: int = 800):
-    """Yield (base, size) for committed writable regions (heap-ish). @author by ak"""
-    import pymem.memory
-
-    address = 0
-    count = 0
-    limit = 0x7FFF0000
-    while address < limit and count < max_regions:
-        try:
-            mbi = pymem.memory.virtual_query(pm.process_handle, address)
-        except Exception:
-            break
-        size = int(getattr(mbi, "RegionSize", 0) or 0x1000)
-        protect = int(getattr(mbi, "Protect", 0) or 0)
-        state = int(getattr(mbi, "State", 0) or 0)
-        base = int(getattr(mbi, "BaseAddress", address) or address)
-        # MEM_COMMIT; writable: PAGE_READWRITE/WRITECOPY/EXECUTE_READWRITE/EXECUTE_WRITECOPY
-        if state == 0x1000 and size > 0 and (protect & 0xCC) and not (protect & 0x101):
-            yield base, size
-            count += 1
-        nxt = base + size
-        if nxt <= address:
-            break
-        address = nxt
+    """Yield writable heap-ish regions; classic first then LAA window. @author by ak"""
+    # writable: PAGE_READWRITE/WRITECOPY/EXECUTE_READWRITE/EXECUTE_WRITECOPY
+    yield from _iter_regions_pm(pm, max_regions, 0xCC, "writable")
 
 
 def scan_position_candidates(

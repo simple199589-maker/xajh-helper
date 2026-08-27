@@ -50,7 +50,9 @@ class PackageAndGroceryTests(unittest.TestCase):
         root = 0x200000
         mid = 0x210000
         host = 0x220000
-        manager = 0x230000
+        # Regression: LARGEADDRESSAWARE clients may allocate the package
+        # manager above 0x80000000; RPM must decide whether it is readable.
+        manager = 0x9785DC20
         package = 0x240000
         array = 0x250000
         item = 0x260000
@@ -87,6 +89,12 @@ class PackageAndGroceryTests(unittest.TestCase):
         )
         get_package.assert_not_called()
         remote_call.assert_not_called()
+
+    def test_rpm_pointer_filter_rejects_only_top_guard(self) -> None:
+        from app.core.package_api import _sane_user_ptr
+
+        self.assertEqual(_sane_user_ptr(0x9785DC20), 0x9785DC20)
+        self.assertEqual(_sane_user_ptr(0xFFFF0000), 0)
 
     def test_item_name_cleanup_and_quality(self) -> None:
         self.assertEqual(_clean_item_name("\ue000\x01白云熊胆丸"), "白云熊胆丸")

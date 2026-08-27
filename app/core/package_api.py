@@ -232,8 +232,14 @@ def _rpm_u32(h: int, address: int) -> int:
 
 
 def _sane_user_ptr(value: int) -> int:
+    """Accept the full WOW64/LARGEADDRESSAWARE 32-bit user address range.
+
+    The client can allocate package-manager objects above 0x80000000. RPM
+    remains the readability authority; only null/low pointers and the top
+    guard region are rejected here.
+    """
     ptr = int(value or 0) & 0xFFFFFFFF
-    return ptr if 0x10000 <= ptr <= 0x7FFF0000 else 0
+    return ptr if 0x10000 <= ptr < 0xFFFF0000 else 0
 
 
 def _module_base_for_rpm(session: GameAttachSession) -> int:

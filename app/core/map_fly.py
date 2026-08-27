@@ -660,7 +660,7 @@ def _aui_get_text(session: GameAttachSession, ctrl: int, *, log: LogFn | None = 
             # If looks like pointer, follow once
             maybe = struct.unpack_from("<I", wb, 0)[0] if len(wb) >= 4 else 0
             candidates = [p]
-            if 0x10000 < maybe < 0x7FFF0000:
+            if 0x10000 < maybe < FLY_PTR_MAX:
                 candidates.append(maybe)
             for addr in candidates:
                 raw = _read_bytes(session, addr, 160)
@@ -1255,7 +1255,7 @@ def _pick_best_fly_name(cands: list[str]) -> str:
 def _read_cstr_name(session: GameAttachSession, ptr: int, *, max_len: int = 48) -> str:
     """Read null-terminated name at pointer (GBK/UTF-16). @author by ak"""
     ptr = int(ptr or 0) & 0xFFFFFFFF
-    if not ptr or ptr < 0x10000 or ptr > 0x7FFF0000:
+    if not ptr or ptr < 0x10000 or ptr > FLY_PTR_MAX:
         return ""
     raw = _read_bytes(session, ptr, max_len) or b""
     return _pick_best_fly_name(_decode_name_blob(raw))
@@ -1299,7 +1299,7 @@ def _read_acstring(session: GameAttachSession, addr: int, *, log: LogFn | None =
 
         # A) classic pointer at +0 → C-string body (primary)
         data_ptr = _read_u32(session, addr)
-        if data_ptr and data_ptr != empty and 0x10000 < data_ptr < 0x7FFF0000:
+        if data_ptr and data_ptr != empty and 0x10000 < data_ptr < FLY_PTR_MAX:
             _absorb(_read_cstr_name(session, data_ptr))
             # also try ACString length-prefixed body when header looks sane
             hdr = _read_bytes(session, (data_ptr - 0xC) & 0xFFFFFFFF, 0xC) or b""
@@ -1326,7 +1326,7 @@ def _read_acstring(session: GameAttachSession, addr: int, *, log: LogFn | None =
                         maybe
                         and maybe != data_ptr
                         and maybe != empty
-                        and 0x10000 < maybe < 0x7FFF0000
+                        and 0x10000 < maybe < FLY_PTR_MAX
                     ):
                         _absorb(_read_cstr_name(session, maybe))
 
@@ -1402,7 +1402,7 @@ def _iter_fly_page_map(
                 seen_nodes.add(node)
                 key = _read_u32(session, (node + 8) & 0xFFFFFFFF)
                 page_obj = _read_u32(session, (node + 0xC) & 0xFFFFFFFF)
-                if page_obj and 0x10000 < page_obj < 0x7FFF0000:
+                if page_obj and 0x10000 < page_obj < FLY_PTR_MAX:
                     key_u = int(key) & 0xFFFFFFFF
                     # custom pages use small keys 0..32
                     if key_u <= 32:
@@ -2132,6 +2132,11 @@ def _moved(before: dict | None, after: dict | None, *, min_dist: float = 1.5) ->
 
 _FLY_MGR_CACHE: dict[int, tuple[float, int]] = {}
 _FLY_MGR_CACHE_TTL_S = 3.0
+# xajh.exe carries IMAGE_FILE_LARGE_ADDRESS_AWARE (verified in its PE
+# header): as a 32-bit process it can place user-mode heap in the 2..4 GB
+# window on x64 Windows (live example: fly_mgr=0x82990038). Pointer guards
+# must accept that range; structural sanity checks catch actual garbage.
+FLY_PTR_MAX = 0xFFFF0000
 # GetHostData@0x4AE420: *global -> +0x24 -> +0x90; fly_mgr=*(host+0x40)
 NOTE_VA_HOST_ROOT_GLOBAL = 0x015282D8
 
@@ -2152,7 +2157,7 @@ def _fly_mgr_via_rpm(session: GameAttachSession, base: int) -> int:
         if not host or host < 0x10000:
             return 0
         mgr = int(_read_u32(session, (host + 0x40) & 0xFFFFFFFF) or 0) & 0xFFFFFFFF
-        if not mgr or mgr < 0x10000 or mgr > 0x7FFF0000:
+        if not mgr or mgr < 0x10000 or mgr > FLY_PTR_MAX:
             return 0
         # page map region must be readable
         _ = _read_u32(session, (mgr + 0x16C) & 0xFFFFFFFF)
@@ -2170,7 +2175,7 @@ def _page_map_sane(session: GameAttachSession, mgr: int) -> bool:
     @author by ak
     """
     mgr = int(mgr) & 0xFFFFFFFF
-    if not mgr or mgr < 0x10000 or mgr > 0x7FFF0000:
+    if not mgr or mgr < 0x10000 or mgr > FLY_PTR_MAX:
         return False
     map_ptr = (mgr + FLY_MGR_PAGE_MAP_OFF) & 0xFFFFFFFF
     try:
@@ -2230,7 +2235,7 @@ def get_fly_manager_ptr(session: GameAttachSession, *, log: LogFn | None = None)
         if not root or root < 0x10000:
             return 0
         mgr = int(_read_u32(session, (root + 0x40) & 0xFFFFFFFF) or 0) & 0xFFFFFFFF
-        if not mgr or mgr < 0x10000 or mgr > 0x7FFF0000:
+        if not mgr or mgr < 0x10000 or mgr > FLY_PTR_MAX:
             return 0
         # page map region must be readable (mirrors RPM path sanity check)
         try:
