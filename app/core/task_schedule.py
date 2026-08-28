@@ -1608,6 +1608,19 @@ class ScheduleTaskRunner:
         from app.core.hang_settings import apply_hang_prepare, get_hang_config, start_hang
 
         cfg = get_hang_config(self._hang_settings, char_id=self._role_id or None)
+        # 霸刀/龙傲天/余沧海/东方 日常用普通挂机(mode=0)，
+        # 但 ignore_dungeon_stuck 需要副本模式才武装，这里单独调用。
+        if bool(getattr(cfg, "ignore_dungeon_stuck", False)):
+            try:
+                from app.core.hang_settings import _arm_dungeon_target_guard
+
+                _arm_dungeon_target_guard(
+                    session, cfg, hwnd=self.hwnd, log=self.log
+                )
+            except Exception as exc:
+                self.log(
+                    f"routine dungeon target guard arm failed: {exc}"
+                )
         normal_cfg = replace(cfg, mode=0)
         prepare = apply_hang_prepare(session, normal_cfg, log=self.log)
         if not bool(prepare.get("ok")):
@@ -1635,6 +1648,13 @@ class ScheduleTaskRunner:
             mode=0,
             ok=ok,
         )
+        # 守护进程状态检查：确保 hang guard 正常运行（拾取放弃/维修/活力）。
+        guard = result.get("guard") or {}
+        if ok and not bool(guard.get("ok", True)):
+            self.log(
+                f"routine hang guard not running: {guard.get('error') or 'unknown'} "
+                f"pid={self.pid} — 守护进程（放弃/维修/活力）将不可用"
+            )
         return ok
 
     def _send_routine_packet(self, session, payload_hex: str) -> bool:

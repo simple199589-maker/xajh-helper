@@ -5840,6 +5840,10 @@ class DungeonUnstickGuard:
         self._follow_check_until: float = 0.0
         # 低频诊断（skip）事件节流，避免战斗信号瞬时不可读时刷屏。
         self._skip_until: float = 0.0
+        # 卡队检测：追踪自己位置与静止持续时间。
+        self._stuck_last_own: tuple[float, float, float] | None = None
+        self._stuck_still_since: float | None = None
+        self._stuck_last_toggle: float = 0.0
 
     # -- geometry helpers ----------------------------------------------------
 
@@ -6054,11 +6058,11 @@ class DungeonUnstickGuard:
 
     # -- observation --------------------------------------------------------
 
-    def _follow_keepalive(self, session) -> None:
-        """组队跟随守护：跟随掉了就补上（1928 / 6230）。
+    def _follow_keepalive(self, session, pos=None) -> None:
+        """组队跟随守护：卡队检测（1928 / 6230）。
 
-        这些副本需要保持组队跟随否则会掉队。周期性读取跟随状态，确认在队但
-        跟随已关时补发开启（封包）。未组队 / 读不到（None）不动作。
+        自己停留 > 5s 且 AOI 中有队友 > 15m 时，取消一次跟随重开。
+        不依赖跟随当前状态，不管开没开都执行。
 
         @author by ak
         """
@@ -6068,34 +6072,118 @@ class DungeonUnstickGuard:
         if now < self._follow_check_until:
             return
         self._follow_check_until = now + 5.0
-        try:
-            from app.core.team_ops import (
-                probe_team_follow_status,
-                set_team_follow,
-            )
 
-            status = probe_team_follow_status(session, log=self._log)
+        if not (isinstance(pos, (tuple, list)) and len(pos) >= 3):
+            return
+        pos3 = (float(pos[0]), float(pos[1]), float(pos[2]))
+
+        # 判定因子 1：自己是否停留 > 5s。
+        prev = self._stuck_last_own
+        if prev is not None:
+            moved = math.hypot(
+                float(pos3[0]) - float(prev[0]),
+                float(pos3[2]) - float(prev[2]),
+            )
+            if moved > 0.5:
+                self._stuck_still_since = None
+        self._stuck_last_own = pos3
+
+        if self._stuck_still_since is None:
+            self._stuck_still_since = now
+            return
+
+        still_dur = now - self._stuck_still_since
+        if still_dur < 5.0:
+            return
+
+        # 判定因子 2：AOI 中是否有队友 > 15m。
+        try:
+            from app.core.team_ops import list_party_members
+            from app.core.plg_objects import CLASS_PLAYER, list_class_objects
+
+            party = list_party_members(session, fresh=True, log=lambda _m: None)
+            if not party or len(party) < 2:
+                return
+            names: set[str] = set()
+            for member in party:
+                if bool(member.get("is_self")):
+                    continue
+                name = str(member.get("name") or "").strip()
+                if name:
+                    names.add(name)
+            if not names:
+                return
+
+            def _name_key(v):
+                return "".join(str(v or "").split()).strip().casefold()
+
+            wanted_keys = {_name_key(n) for n in names}
+            objects = list_class_objects(
+                session,
+                CLASS_PLAYER,
+                radius=60.0,
+                limit=96,
+                read_name=True,
+                read_tid=False,
+                log=lambda _m: None,
+            )
+            has_far = False
+            for obj in objects or []:
+                name = str(getattr(obj, "name", "") or "").strip()
+                if not name or _name_key(name) not in wanted_keys:
+                    continue
+                x = getattr(obj, "x", None)
+                z = getattr(obj, "z", None)
+                if x is None or z is None:
+                    continue
+                dist = math.hypot(float(x) - pos3[0], float(z) - pos3[2])
+                if dist > 15.0:
+                    has_far = True
+                    break
         except Exception:
             return
-        if status is not False:
-            # True=已开 / None=未组队或读不到：不动作。
+
+        if not has_far:
+            self._stuck_still_since = None
             return
+
+        # 防抖 30s。
+        if now - self._stuck_last_toggle < 30.0:
+            return
+        self._stuck_last_toggle = now
+        self._stuck_still_since = None
+
+        from app.core.team_ops import set_team_follow
+
+        self._emit(
+            "dungeon_unstick_move",
+            f"卡队检测：自己停留 {still_dur:.0f}s + 队友>15m，取消跟随重开",
+            ok=True,
+        )
+        # 不管跟随当前开没开，先取消再重开。
         try:
-            r = set_team_follow(
+            set_team_follow(
+                session, enabled=False, use_ui_click=False, log=self._log
+            )
+        except Exception:
+            pass
+        time.sleep(1.0)
+        try:
+            r2 = set_team_follow(
                 session, enabled=True, use_ui_click=False, log=self._log
             )
         except Exception:
             return
-        if r.ok:
+        if r2.ok:
             self._emit(
                 "dungeon_unstick_move",
-                "检测到组队跟随掉了，已补上",
+                "卡队：组队跟随已重新开启",
                 ok=True,
             )
         else:
             self._emit(
                 "dungeon_unstick_skip",
-                f"补组队跟随失败: {r.message}",
+                f"卡队：重开跟随失败: {r2.message}",
                 ok=False,
             )
 
@@ -6116,7 +6204,7 @@ class DungeonUnstickGuard:
         if self._moving:
             return
         # 1928：组队跟随守护（跟随掉了就补上），与是否在卡点区无关。
-        self._follow_keepalive(session)
+        self._follow_keepalive(session, pos=pos)
         if not (isinstance(pos, (tuple, list)) and len(pos) >= 3):
             # Coordinates unreadable: fail closed for this tick.
             self._reset_window()

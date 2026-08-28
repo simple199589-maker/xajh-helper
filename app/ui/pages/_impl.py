@@ -10616,29 +10616,30 @@ class TaskPage(FeaturePage):
             pass
         super().destroy()
 
-    def _bind_task_sync(self) -> None:
+    def _bind_task_sync(self, *, reload_control: bool = True) -> None:
         pid = int(self._fixed_pid or 0)
         if not pid:
             return
-        # 绑定可能换角色：清 role_id 缓存后重新解析。
-        try:
-            self._clear_role_id_cache()
-        except Exception:
-            pass
-        # 从角色配置恢复队内控（正式流程：登录绑定后读 control.json）。
-        try:
-            rid = self._current_role_id()
-            if rid:
-                from app.core.account_manager import load_role_control
+        if reload_control:
+            # 绑定可能换角色：清 role_id 缓存后重新解析。
+            try:
+                self._clear_role_id_cache()
+            except Exception:
+                pass
+            # 从角色配置恢复队内控（正式流程：登录绑定后读 control.json）。
+            try:
+                rid = self._current_role_id()
+                if rid:
+                    from app.core.account_manager import load_role_control
 
-                ctl = load_role_control(rid)
-                cfg_role = str(ctl.get("role") or ROLE_NONE).lower()
-                if cfg_role in (ROLE_NONE, ROLE_MASTER, ROLE_SLAVE):
-                    self.settings["task_control_role"] = cfg_role
-                if "team" in ctl:
-                    self.settings["team_control_enabled"] = bool(ctl["team"])
-        except Exception:
-            pass
+                    ctl = load_role_control(rid)
+                    cfg_role = str(ctl.get("role") or ROLE_NONE).lower()
+                    if cfg_role in (ROLE_NONE, ROLE_MASTER, ROLE_SLAVE):
+                        self.settings["task_control_role"] = cfg_role
+                    if "team" in ctl:
+                        self.settings["team_control_enabled"] = bool(ctl["team"])
+            except Exception:
+                pass
         role = str(self.settings.get("task_control_role") or ROLE_NONE).lower()
         if role not in (ROLE_NONE, ROLE_MASTER, ROLE_SLAVE):
             role = ROLE_NONE
@@ -10739,7 +10740,8 @@ class TaskPage(FeaturePage):
         if not pid or (not task_id and not allow_zero):
             return False
         # Re-bind so late Settings changes are reflected before publish.
-        self._bind_task_sync()
+        # reload_control=False: 不重新读 control.json，避免运行时角色被覆盖。
+        self._bind_task_sync(reload_control=False)
         role = self._control_role()
         snap = self._sync_hub.snapshot()
         if role != ROLE_MASTER:
