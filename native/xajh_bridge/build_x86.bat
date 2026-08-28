@@ -9,7 +9,11 @@ call %VCVARS% x86
 if errorlevel 1 exit /b 1
 
 set ROOT=%~dp0..\..
-set BUILD=%ROOT%\build\native
+cd /d "%ROOT%"
+set OUT=%ROOT%\build\native
+if defined XAJH_NATIVE_BIN_DIR set OUT=%XAJH_NATIVE_BIN_DIR%
+set BUILD=%ROOT%\build\native\xajh_bridge
+if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%BUILD%" mkdir "%BUILD%"
 
 cl /nologo /utf-8 /O2 /MT /LD /EHsc /W3 /DWIN32 /D_WINDOWS /Fo:"%BUILD%\\" "%~dp0dllmain.cpp" /Fe:"%BUILD%\xajh_bridge.dll" /link /DLL user32.lib kernel32.lib psapi.lib advapi32.lib
@@ -21,11 +25,16 @@ if not defined BRIDGE_BUILD_ID (
   echo failed to resolve BRIDGE_BUILD_ID from app/core/bridge_protocol.py
   exit /b 1
 )
-copy /Y "%BUILD%\xajh_bridge.dll" "%BUILD%\xajh_bridge_%BRIDGE_BUILD_ID%.dll" >nul
+copy /Y "%BUILD%\xajh_bridge.dll" "%OUT%\xajh_bridge.dll" >nul
+if errorlevel 1 exit /b 1
+copy /Y "%BUILD%\xajh_inject.exe" "%OUT%\xajh_inject.exe" >nul
+if errorlevel 1 exit /b 1
+del /Q "%OUT%\xajh_bridge_*.dll" >nul 2>&1
+copy /Y "%BUILD%\xajh_bridge.dll" "%OUT%\xajh_bridge_%BRIDGE_BUILD_ID%.dll" >nul
 if errorlevel 1 exit /b 1
 
 echo built:
-dir /b "%BUILD%\xajh_bridge*.dll" "%BUILD%\xajh_inject.exe"
+dir /b "%OUT%\xajh_bridge*.dll" "%OUT%\xajh_inject.exe"
 endlocal
 
 

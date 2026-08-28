@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
 
-from app.core.bridge_protocol import BRIDGE_BUILD_ID
+from app.core.native_inventory import required_names
 
 block_cipher = None
 ROOT = Path(SPECPATH).resolve()
@@ -40,18 +40,13 @@ datas = [
         if path.is_file() and path.name != "build_profile.json"
     ],
     (str(PROFILE_PATH), "app/data"),
-    # Ship current bridge DLL + injector next to runtime _MEIPASS/native/bin
-    (str(NATIVE_BIN_SOURCE / "xajh_bridge.dll"), "native/bin"),
-    (
-        str(NATIVE_BIN_SOURCE / f"xajh_bridge_{BRIDGE_BUILD_ID}.dll"),
-        "native/bin",
-    ),
-    (str(NATIVE_BIN_SOURCE / "xajh_chat_tap.dll"), "native/bin"),
-    (str(NATIVE_BIN_SOURCE / "xajh_team_tap.dll"), "native/bin"),
-    (str(NATIVE_BIN_SOURCE / "xajh_inject.exe"), "native/bin"),
-    (str(NATIVE_BIN_SOURCE / "dummy_damage_reader.exe"), "native/bin"),
-    (str(NATIVE_BIN_SOURCE / "xajh_login_bridge_v2.dll"), "native/bin"),
-    (str(NATIVE_BIN_SOURCE / "xajh_login_inject.exe"), "native/bin"),
+    # Ship the full native inventory (bridge + stamped copy + tap DLLs + injector
+    # + exes) next to runtime _MEIPASS/native/bin. The authoritative list lives in
+    # app/core/native_inventory.py; a missing file fails packaging here, not later.
+    *[
+        (str(NATIVE_BIN_SOURCE / name), "native/bin")
+        for name in required_names()
+    ],
 ]
 datas += pystray_datas + pil_datas
 

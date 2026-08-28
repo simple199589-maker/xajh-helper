@@ -1,5 +1,5 @@
 @echo off
-rem Build standalone login-stage bridge (x86) — independent of production bridge.
+rem Build standalone login-stage bridge (x86) - independent of production bridge.
 rem @author by ak
 setlocal
 set VCVARS="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
@@ -11,7 +11,7 @@ call %VCVARS% x86
 if errorlevel 1 exit /b 1
 
 set ROOT=%~dp0..\..
-set OUT=%ROOT%\native\bin
+set OUT=%ROOT%\build\native
 if defined XAJH_NATIVE_BIN_DIR set OUT=%XAJH_NATIVE_BIN_DIR%
 set BUILD=%ROOT%\build\native_login
 if not exist "%OUT%" mkdir "%OUT%"

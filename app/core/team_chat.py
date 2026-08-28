@@ -741,7 +741,12 @@ TEAM_TAP_OFF_IDENT0 = TEAM_TAP_OFF_DUMP + 256  # 1716
 TEAM_TAP_OFF_IDENT1 = TEAM_TAP_OFF_IDENT0 + 4  # 1720
 TEAM_TAP_OFF_IDENT2 = TEAM_TAP_OFF_IDENT1 + 4  # 1724
 TEAM_TAP_OFF_IDENT_SEEN = TEAM_TAP_OFF_IDENT2 + 4  # 1728
-TEAM_TAP_SIZE = TEAM_TAP_OFF_IDENT_SEEN + 4  # 1732
+# 精确扫描结果（v5）：vtable + self/config 不变式定位，无需先收到聊天调用。
+TEAM_TAP_OFF_EXACT_STATUS = TEAM_TAP_OFF_IDENT_SEEN + 4  # 1732
+TEAM_TAP_OFF_EXACT_COUNT = TEAM_TAP_OFF_EXACT_STATUS + 4  # 1736
+TEAM_TAP_OFF_EXACT_SEND_MGR = TEAM_TAP_OFF_EXACT_COUNT + 4  # 1740
+TEAM_TAP_OFF_EXACT_SEEN = TEAM_TAP_OFF_EXACT_SEND_MGR + 4  # 1744
+TEAM_TAP_SIZE = TEAM_TAP_OFF_EXACT_SEEN + 4  # 1748
 TEAM_SEND_IDLE = 0
 TEAM_SEND_PENDING = 1
 TEAM_SEND_DONE = 2
@@ -802,12 +807,32 @@ def _team_tap_read(pid: int) -> dict:
     if not h:
         return {}
     try:
-        view = k32.MapViewOfFile(h, 0x0004, 0, 0, TEAM_TAP_SIZE)
+        # Map the whole section so old (smaller) and v5 (larger) taps both work.
+        view = k32.MapViewOfFile(h, 0x0004, 0, 0, 0)
         if not view:
             return {}
         try:
-            raw = ctypes.string_at(view, TEAM_TAP_SIZE)
+            class MBI(ctypes.Structure):
+                _fields_ = [
+                    ("BaseAddress", ctypes.c_size_t),
+                    ("AllocationBase", ctypes.c_size_t),
+                    ("AllocationProtect", wintypes.DWORD),
+                    ("RegionSize", ctypes.c_size_t),
+                    ("State", wintypes.DWORD),
+                    ("Protect", wintypes.DWORD),
+                    ("Type", wintypes.DWORD),
+                ]
+
+            mbi = MBI()
+            mapped_size = TEAM_TAP_SIZE
+            if k32.VirtualQuery(ctypes.c_void_p(view), ctypes.byref(mbi), ctypes.sizeof(mbi)):
+                mapped_size = min(TEAM_TAP_SIZE, int(mbi.RegionSize))
+            raw = ctypes.string_at(view, mapped_size)
             magic = int.from_bytes(raw[0:4], "little")
+            declared_size = int.from_bytes(raw[8:12], "little")
+            # Never treat page-granular readable bytes as protocol fields.
+            if magic == int.from_bytes(b"TMTP", "big") and 28 <= declared_size <= len(raw):
+                raw = raw[:declared_size]
             status = int.from_bytes(raw[12:16], "little")
             send_mgr = int.from_bytes(
                 raw[TEAM_TAP_OFF_SEND_MGR:TEAM_TAP_OFF_SEND_MGR + 4], "little"
@@ -840,10 +865,20 @@ def _team_tap_read(pid: int) -> dict:
                     )
                     if seq:
                         hits.append({"seq": seq, "self": self_, "caller": caller})
+            exact_status = exact_count = exact_mgr = exact_seen = 0
+            if TEAM_TAP_OFF_EXACT_SEEN + 4 <= len(raw):
+                exact_status = int.from_bytes(raw[TEAM_TAP_OFF_EXACT_STATUS:TEAM_TAP_OFF_EXACT_STATUS + 4], "little")
+                exact_count = int.from_bytes(raw[TEAM_TAP_OFF_EXACT_COUNT:TEAM_TAP_OFF_EXACT_COUNT + 4], "little")
+                exact_mgr = int.from_bytes(raw[TEAM_TAP_OFF_EXACT_SEND_MGR:TEAM_TAP_OFF_EXACT_SEND_MGR + 4], "little")
+                exact_seen = int.from_bytes(raw[TEAM_TAP_OFF_EXACT_SEEN:TEAM_TAP_OFF_EXACT_SEEN + 4], "little")
             return {
-                "magic": magic, "status": status, "send_mgr": send_mgr,
+                "magic": magic, "version": int.from_bytes(raw[4:8], "little"),
+                "struct_size": int.from_bytes(raw[8:12], "little"),
+                "status": status, "send_mgr": send_mgr,
                 "seen": seen, "hits": hits,
                 "send_ident": send_ident, "send_ident_seen": send_ident_seen,
+                "exact_status": exact_status, "exact_count": exact_count,
+                "exact_send_mgr": exact_mgr, "exact_seen": exact_seen,
             }
         finally:
             k32.UnmapViewOfFile(ctypes.c_void_p(view))
@@ -860,7 +895,8 @@ def ensure_team_tap(pid: int, *, log: LogFn | None = None) -> bool:
     if not pid:
         return False
     cur = _team_tap_read(pid)
-    if cur.get("magic") == TEAM_TAP_MAGIC and cur.get("status") == TEAM_TAP_ACTIVE:
+    if (cur.get("magic") == TEAM_TAP_MAGIC and cur.get("status") == TEAM_TAP_ACTIVE
+            and int(cur.get("version") or 0) >= 5):
         return True
     # error/未激活状态也尝试重新注入（新版 DLL 会覆盖共享内存状态）。
     dll, injector = _team_tap_paths()
@@ -887,6 +923,9 @@ def ensure_team_tap(pid: int, *, log: LogFn | None = None) -> bool:
         log("队内控 [tap] 注入后共享内存未就绪")
         return False
     ok = cur.get("status") == TEAM_TAP_ACTIVE
+    if ok and int(cur.get("version") or 0) < 5:
+        log("队内控 [tap] 旧版 DLL 已驻留（需重启游戏后加载 v5 精确扫描版）")
+        return False
     if not ok:
         log(f"队内控 [tap] 未激活 status={cur.get('status')}")
     return ok

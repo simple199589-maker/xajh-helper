@@ -64,39 +64,26 @@ if errorlevel 1 (
   echo native login bridge build failed
   exit /b 1
 )
+call "native\xajh_team_tap\build_x86.bat"
+if errorlevel 1 (
+  echo native team tap build failed
+  exit /b 1
+)
 call "native\dummy_damage_reader\build_x86.bat"
 if errorlevel 1 (
   echo native dummy damage reader build failed
   exit /b 1
 )
-copy /Y "native\bin\xajh_team_tap.dll" "%XAJH_NATIVE_BIN_DIR%\xajh_team_tap.dll" >nul
+call python tools\check_native_bin.py
 if errorlevel 1 (
-  echo failed to stage rebuilt native components
+  echo native bin inventory check failed
   exit /b 1
 )
-if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_bridge.dll" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\xajh_bridge.dll
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_inject.exe" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\xajh_inject.exe
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_team_tap.dll" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\xajh_team_tap.dll
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_login_bridge_v2.dll" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\xajh_login_bridge_v2.dll
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\xajh_login_inject.exe" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\xajh_login_inject.exe
-  exit /b 1
-)
-if not exist "%XAJH_NATIVE_BIN_DIR%\dummy_damage_reader.exe" (
-  echo missing %XAJH_NATIVE_BIN_DIR%\dummy_damage_reader.exe
-  exit /b 1
+REM Sync products to the source-run dir native\bin too (best effort: a running
+REM source may lock native\bin DLLs, which must not block this packaging).
+if not exist "%CD%\native\bin" mkdir "%CD%\native\bin"
+for %%F in ("%XAJH_NATIVE_BIN_DIR%\*.dll" "%XAJH_NATIVE_BIN_DIR%\*.exe") do (
+  copy /Y "%%F" "%CD%\native\bin\" >nul 2>&1
 )
 echo native bridge: OK
 

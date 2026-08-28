@@ -18,10 +18,8 @@ dist/
 build/generated/
 .env
 .env.local
-native/bin/xajh_bridge_*.dll
-native/bin/xajh_bridge_new.dll
-native/bin/*.obj
-native/bin/build*.txt
+# Native bridge build artifacts — rebuilt via native/build_all.bat, never committed
+native/bin/
 *.obj
 _tmp_*
 .tmp_*
