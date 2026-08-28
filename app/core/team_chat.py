@@ -754,6 +754,9 @@ TEAM_SEND_ERR = 3
 # mailbox 发送等待上限（DLL 在游戏内线程处理，通常 <50ms）
 TEAM_MAILBOX_TIMEOUT_S = 2.0
 TEAM_MAILBOX_POLL_S = 0.005
+# v5 精确扫描线程约 500ms 一轮；注入后第一条消息要等它完成第一次扫描。
+TEAM_EXACT_SCAN_WAIT_S = 2.0
+TEAM_EXACT_SCAN_POLL_S = 0.05
 
 
 def _team_tap_paths() -> tuple:
@@ -963,6 +966,19 @@ def resolve_send_mgr(pid: int, *, ensure: bool = True, log: LogFn | None = None)
         mgr = read_send_mgr_from_shm(pid)
         if mgr:
             return mgr
+        # v5 的精确扫描在游戏进程内异步执行；刚注入时 status 已 ACTIVE，
+        # 但 send_mgr 可能还没写回共享内存。这里短等待一次，避免第一条
+        # 队内控命令被误判为“发送管理器未捕获”。
+        cur = _team_tap_read(pid)
+        if (cur.get("magic") == TEAM_TAP_MAGIC
+                and cur.get("status") == TEAM_TAP_ACTIVE
+                and int(cur.get("version") or 0) >= 5):
+            deadline = time.monotonic() + TEAM_EXACT_SCAN_WAIT_S
+            while time.monotonic() < deadline:
+                time.sleep(TEAM_EXACT_SCAN_POLL_S)
+                mgr = read_send_mgr_from_shm(pid)
+                if mgr:
+                    return mgr
     raw = str(os.environ.get(TEAM_SEND_MGR_ENV) or "").strip()
     if raw:
         try:
@@ -1102,7 +1118,7 @@ def _team_mailbox_send(pid: int, plaintext: bytes, *, log: LogFn | None = None) 
         pass
     send_mgr = resolve_send_mgr(pid, log=log)
     if not send_mgr:
-        log("队内控 [发] 发送管理器未捕获（需游戏自动调用触发，稍后重试）")
+        log("队内控 [发] 发送管理器精确扫描未命中（已等待2秒）")
         return {"ok": False, "error": "send_mgr not captured"}
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -1227,7 +1243,7 @@ def _send_via_wrapper_legacy(pid: int, plaintext: bytes, *, log: LogFn | None = 
         log("队内控 [发] 无法解析聊天包装地址")
         return {"ok": False, "error": "wrapper unresolved"}
     if not send_mgr:
-        log("队内控 [发] 发送管理器未捕获（需游戏自动调用触发，稍后重试）")
+        log("队内控 [发] 发送管理器精确扫描未命中（legacy 回退不可用）")
         return {"ok": False, "error": "send_mgr not captured"}
 
     handle = open_process(pid)
@@ -1788,7 +1804,4 @@ __all__ = [
     "team_control_flag_enabled",
     "text_to_action",
 ]
-
-
-
 

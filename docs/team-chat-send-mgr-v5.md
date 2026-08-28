@@ -71,6 +71,8 @@ CRYPTO_CFG_B_RVA    = 0x01961B9C
    - `exact_scan_status = EXACT_SCAN_FOUND`
    - `exact_scan_count = 1`
 5. Python 侧读取共享内存并校验 v5、active、唯一命中。
+   Python 会在“DLL 已 ACTIVE、但扫描线程还没写回第一轮结果”时短等待最多 2 秒，
+   消除注入后第一条命令被误判为 `send_mgr not captured` 的竞态。
 6. Python 构造聊天 c2s 明文，写入 mailbox。
 7. 游戏进程内 sender 线程以正确 thiscall 栈帧调用 `0x00D089B0` 发送。
 8. 接收继续由 `xajh_chat_tap.dll` 的队伍专用 ring 读取。
@@ -207,6 +209,9 @@ native bin OK: 8 files present
 
 ## 9. 边界
 
+- 注入后 DLL 精确扫描是异步的；当前 Python 侧最多等待 2 秒。若 2 秒后仍
+  `send_mgr == 0`，会明确报“精确扫描未命中”，此时应看 `exact_status`：
+  `running` 需继续等待，`multiple` / `not_found` 必须先排查环境。
 - 该成果只固化“精确找到 send_mgr 并发送队伍聊天”。
 - 客户端更新、PE 时间戳、镜像大小、vtable RVA或对象布局变化时，必须重新逆向并更新签名。
 - `exact_count != 1` 时不允许选择候选对象发送，避免误投递或崩溃。

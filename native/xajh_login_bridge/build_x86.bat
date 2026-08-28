@@ -17,9 +17,9 @@ set BUILD=%ROOT%\build\native_login
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%BUILD%" mkdir "%BUILD%"
 
-cl /nologo /utf-8 /O2 /MT /LD /EHsc /W3 /DWIN32 /D_WINDOWS /Fo:"%BUILD%\\" "%~dp0dllmain.cpp" /Fe:"%BUILD%\xajh_login_bridge_v2.dll" /link /DLL user32.lib kernel32.lib
+cl /nologo /utf-8 /O2 /MT /LD /EHsc /W3 /Brepro /DWIN32 /D_WINDOWS /Fo:"%BUILD%\\" "%~dp0dllmain.cpp" /Fe:"%BUILD%\xajh_login_bridge_v2.dll" /link /Brepro /DLL user32.lib kernel32.lib
 if errorlevel 1 exit /b 1
-cl /nologo /utf-8 /O2 /MT /EHsc /W3 /DWIN32 /Fo:"%BUILD%\\" "%~dp0injector.cpp" /Fe:"%BUILD%\xajh_login_inject.exe" /link kernel32.lib
+cl /nologo /utf-8 /O2 /MT /EHsc /W3 /Brepro /DWIN32 /Fo:"%BUILD%\\" "%~dp0injector.cpp" /Fe:"%BUILD%\xajh_login_inject.exe" /link /Brepro kernel32.lib
 if errorlevel 1 exit /b 1
 copy /Y "%BUILD%\xajh_login_bridge_v2.dll" "%OUT%\xajh_login_bridge_v2.dll" >nul
 if errorlevel 1 exit /b 1
