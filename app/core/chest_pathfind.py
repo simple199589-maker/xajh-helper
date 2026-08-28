@@ -249,6 +249,7 @@ def list_player_positions(
             host_pos=host_pos,
             radius=None,
             limit=int(limit),
+            read_tid=False,  # 玩家无NPC模板ID，RPM读tid会返回None被判为stale跳过
             log=log,
         )
     except Exception as e:

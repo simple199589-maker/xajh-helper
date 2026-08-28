@@ -203,6 +203,7 @@ def scan_nearby_entities(
             host_pos=host_pos,
             radius=float(radius) if radius else None,
             limit=per_class_limit,
+            read_tid=(cid != CLASS_PLAYER),  # 玩家无NPC模板ID，读tid会被过滤掉
             log=log,
         )
         for o in objs:

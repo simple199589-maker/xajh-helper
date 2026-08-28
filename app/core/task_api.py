@@ -7415,13 +7415,25 @@ def pathfind_task(
                 # GetObjectTemplateID can dereference a freed object during load.
                 npcs = [portal_hint]
             else:
-                try:
-                    npcs = list_nearby_npcs(
-                        session, radius=float(portal_radius), limit=48, log=log
-                    )
-                except Exception as e:
-                    npcs = []
-                    log(f"task_api portal scan fail: {e}")
+                npcs = []
+                # 刚过图/飞回某场景时，NPC 对象列表可能尚未枚举完成，瞬时扫到 0 个，
+                # 从而误判“附近无传送口”。此处短暂重试几次，等场景 NPC 加载完成。
+                npc_retries = 5
+                for _attempt in range(npc_retries):
+                    try:
+                        npcs = list_nearby_npcs(
+                            session, radius=float(portal_radius), limit=48, log=log
+                        )
+                    except Exception as e:
+                        npcs = []
+                        log(f"task_api portal scan fail: {e}")
+                    if npcs:
+                        break
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    if _attempt + 1 >= npc_retries:
+                        break
+                    time.sleep(2.0)
             _cand_n = 1 if prefer_tid else 5
             cands = list_portal_npc_candidates(
                 npcs, kind, tier=tier, prefer_tid=prefer_tid, max_n=_cand_n

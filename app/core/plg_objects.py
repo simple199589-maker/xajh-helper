@@ -83,6 +83,11 @@ OBJ_POS_OFF = 0x158
 # crash the game (0xC00000FD in the production log).
 PLG_OBJ_TID_OFF = 0x4F8
 PLG_OBJ_TID_FN_RVA = 0x3B8060
+# 2026-08-28 matter (class-1) live vtable evidence (44/44 chest/matter objects):
+#   obj->[vtbl+0x84] == image_base + 0x2F7800
+#   that getter reads u32 at obj+0x388. Same slot as NPC, distinct getter/offset.
+PLG_OBJ_MATTER_TID_OFF = 0x388
+PLG_OBJ_MATTER_TID_FN_RVA = 0x2F7800
 USER_PTR_MAX = 0xFFFF0000  # WOW64 / LARGEADDRESSAWARE upper bound
 
 
@@ -280,14 +285,30 @@ def _user_addr_ok(addr: int, size: int = 1) -> bool:
     return 0x10000 <= addr and addr + size <= USER_PTR_MAX
 
 
-def read_object_template_id(session, obj_ptr: int) -> int | None:
+def read_object_template_id(
+    session, obj_ptr: int, *, class_id: int | None = None
+) -> int | None:
     """
-    Read a live object's template id without entering the game process.
+    Read a live object's template id via pure RPM (no remote CRT call).
 
     The vtable slot is checked first so arbitrary/freed memory is not mistaken
     for a template id. Returns None when the pointer, vtable function, or RPM
     read does not exactly match the verified client layout.
+
+    - class-0 (player): no template id -> None.
+    - class-1 (matter/ground/chest): vtbl[0x84] == base+0x2F7800, read
+      obj+0x388.
+    - class-2 (NPC/monster) / unknown: vtbl[0x84] == base+0x3B8060, read
+      obj+0x4F8.
     """
+    if class_id == CLASS_PLAYER:
+        return None
+    if class_id == CLASS_MATTER:
+        tid_off = PLG_OBJ_MATTER_TID_OFF
+        fn_rva = PLG_OBJ_MATTER_TID_FN_RVA
+    else:
+        tid_off = PLG_OBJ_TID_OFF
+        fn_rva = PLG_OBJ_TID_FN_RVA
     ptr = _u32(obj_ptr)
     if not _user_addr_ok(ptr, 4):
         return None
@@ -306,15 +327,13 @@ def read_object_template_id(session, obj_ptr: int) -> int | None:
         fn = _u32(
             struct.unpack("<I", _read_process_bytes(pm, vtbl + 0x84, 4))[0]
         )
-        if fn < module_base:
+        if _u32(fn - module_base) != fn_rva:
             return None
-        if _u32(fn - module_base) != PLG_OBJ_TID_FN_RVA:
-            return None
-        if not _user_addr_ok(ptr + PLG_OBJ_TID_OFF, 4):
+        if not _user_addr_ok(ptr + tid_off, 4):
             return None
         return int(
             struct.unpack(
-                "<I", _read_process_bytes(pm, ptr + PLG_OBJ_TID_OFF, 4)
+                "<I", _read_process_bytes(pm, ptr + tid_off, 4)
             )[0]
         )
     except Exception:
@@ -512,9 +531,9 @@ def list_class_objects(
         for phase in phases:
             if phase == "tid" and do_tid:
                 try:
-                    tid = read_object_template_id(session, p)
+                    tid = read_object_template_id(session, p, class_id=class_id)
                 except Exception as e:
-                    log(f"GetObjectTemplateID RPM fail p=0x{_u32(p):X} err={e}")
+                    log(f"GetObjectTemplateID fail p=0x{_u32(p):X} err={e}")
                     tid = None
                 if tid is None:
                     # Unknown vtable or stale/freed pointer: skip it. Never

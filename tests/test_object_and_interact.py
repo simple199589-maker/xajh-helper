@@ -98,7 +98,9 @@ class ObjectAndInteractTests(unittest.TestCase):
             "app.core.plg_objects.read_wstr", side_effect=_name
         ), patch(
             "app.core.plg_objects.read_object_template_id",
-            side_effect=lambda _session, ptr: 778899 if int(ptr) == 0x2000 else None,
+            side_effect=lambda _session, ptr, *, class_id=None: (
+                778899 if int(ptr) == 0x2000 else None
+            ),
         ):
             rows = list_class_objects(
                 session,

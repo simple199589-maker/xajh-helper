@@ -26,6 +26,7 @@ from app.core.activity_auto import (
     ActivityStepEvent,
     instance_label,
     read_flourish_points,
+    wait_map_ready,
 )
 from app.core.runner import RunnerLifecycle, interruptible_sleep
 from app.core.automove import read_scene_position
@@ -1732,6 +1733,15 @@ class ScheduleTaskRunner:
                     self._routine_user_log(f"操作：{reason}，飞行棋发送失败")
                     return False
                 settled = self._wait_routine_scene_stable(fly_session, 68, 15.0)
+                if settled:
+                    # 回福州过图：场景已确认 68 后，复用公用过图等待判断坐标可读且稳定。
+                    settled = wait_map_ready(
+                        fly_session,
+                        ActivityConfig(),
+                        stop_event=self._stop,
+                        log=self.log,
+                        require_dungeon=False,
+                    )
                 self.log(f"daily routine return: {reason}，{'已到福州城' if settled else '福州城地图未就绪'}")
                 self._routine_user_log(f"操作：{reason}，{'已到福州城' if settled else '福州城地图未就绪'}")
                 return settled
@@ -1844,11 +1854,12 @@ class ScheduleTaskRunner:
             return False
 
     def _wait_routine_post_scene_settle(self, task_id: int, definition_id: str) -> bool:
-        """Give every controlled client time to finish the scene transition."""
+        """等队友 AOI 到位：固定等待，因为无法预知他人网速/过图速度。"""
         seconds = 10.0
         try:
             if self._team_control_enabled:
                 from app.core.team_chat import send_team_message
+
                 send_team_message(self.pid, f"过图完成，任务#{task_id}统一等待10秒后判断AOI", log=self.log)
             self._routine_emit("scene_settle_wait", "主控过图稳定，统一等待10秒后判断AOI", task_id, definition_id, seconds=seconds)
             return interruptible_sleep(seconds, self._stop)
@@ -1897,7 +1908,7 @@ class ScheduleTaskRunner:
                     radius=60.0,
                     limit=96,
                     read_name=True,
-                    read_tid=True,
+                    read_tid=False,
                     log=lambda _m: None,
                 )
                 def _name_key(value: object) -> str:
@@ -1947,7 +1958,7 @@ class ScheduleTaskRunner:
                     radius=None,
                     limit=96,
                     read_name=True,
-                    read_tid=True,
+                    read_tid=False,
                     log=lambda _m: None,
                 )
                 live_state = get_live_scene(self.pid, max_age_s=10.0)
@@ -2087,14 +2098,15 @@ class ScheduleTaskRunner:
         if not interruptible_sleep(10.0, self._stop):
             return False
         return self._fly_routine_fuzhou(session, task_id, definition_id, reason=reason)
-    def _routine_cooldown(self, task_id: int, definition_id: str) -> bool:
-        """Wait before advancing after a daily resident task completes."""
+    def _routine_cooldown(self, task_id: int, definition_id: str, *, reason: str | None = None) -> bool:
+        """Wait before advancing to the next daily routine item (also on skip/fail)."""
         seconds = max(0.0, float(self._activity_entry_cd_s or 30.0))
         if seconds <= 0.0:
             return True
+        label = reason or "日常任务完成"
         self._routine_emit(
             "routine_cooldown",
-            f"日常任务完成，冷却 {seconds:.0f}s 后继续",
+            f"{label}，冷却 {seconds:.0f}s 后继续",
             task_id,
             definition_id,
             seconds=seconds,
@@ -2218,7 +2230,7 @@ class ScheduleTaskRunner:
         if result:
             self._routine_emit("routine_done", "过图后AOI超时，已返城结束当前任务", task_id, definition_id, ok=False)
             self._routine_user_log(f"操作：#{task_id} 过图后AOI超时，已返城结束当前任务")
-            return "next"
+            return "next" if self._routine_cooldown(task_id, definition_id, reason="AOI超时返城") else "blocked"
         self._routine_user_log(f"操作：#{task_id} AOI超时返城失败")
         return "blocked"
     def _skip_empty_routine(self, session, item, task_id: int, definition_id: str) -> str:
@@ -2226,6 +2238,7 @@ class ScheduleTaskRunner:
         result = "next" if self._return_routine_fuzhou(session, task_id, definition_id, reason="当前地图无怪") else "blocked"
         if result == "next":
             self._routine_emit("routine_done", "当前日常无怪，已返城跳过", task_id, definition_id)
+            return "next" if self._routine_cooldown(task_id, definition_id, reason="当前地图无怪") else "blocked"
         return result
 
     def _skip_unreachable_routine(self, session, task_id: int, definition_id: str) -> str:
@@ -2238,6 +2251,7 @@ class ScheduleTaskRunner:
         result = "next" if self._return_routine_fuzhou(session, task_id, definition_id, reason="目标均不可达") else "blocked"
         if result == "next":
             self._routine_emit("routine_done", "目标均不可达，已返城跳过", task_id, definition_id)
+            return "next" if self._routine_cooldown(task_id, definition_id, reason="目标均不可达") else "blocked"
         return result
 
     def _execute_custom_routine(self, session, item) -> str:

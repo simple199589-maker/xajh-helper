@@ -955,11 +955,15 @@ class SuperLootPage(FeaturePage):
         self._path_failure_counts: dict[int, int] = {}
         # Load coord-fixed bans (survive restart/crash).
         try:
-            from app.core.loot_fixed_blacklist import apply_fixed_to_skip_ids
+            from app.core.loot_fixed_blacklist import (
+                apply_fixed_to_skip_ids,
+                apply_fixed_to_skip_points,
+            )
 
             n_fix = apply_fixed_to_skip_ids(self._skip_ids, log=self.log)
-            if n_fix:
-                self.log(f"自动宝箱: 已载入固定黑名单 keys~{n_fix}")
+            n_pt = apply_fixed_to_skip_points(self._skip_points, log=self.log)
+            if n_fix or n_pt:
+                self.log(f"自动宝箱: 已载入固定黑名单 keys~{n_fix} points~{n_pt}")
         except Exception as e:
             self.log(f"自动宝箱: 固定黑名单载入失败 {e}")
         self._schedule_ui_drain(120)
@@ -1691,7 +1695,10 @@ class SuperLootPage(FeaturePage):
 
     def _on_clear_blacklist(self) -> None:
         """Clear runtime skip only; fixed JSON kept. @author by ak"""
-        from app.core.loot_fixed_blacklist import apply_fixed_to_skip_ids
+        from app.core.loot_fixed_blacklist import (
+            apply_fixed_to_skip_ids,
+            apply_fixed_to_skip_points,
+        )
 
         self._skip_ids.clear()
         self._skip_points.clear()
@@ -1704,8 +1711,10 @@ class SuperLootPage(FeaturePage):
         # Re-apply permanent fixed bans after runtime clear.
         try:
             n = apply_fixed_to_skip_ids(self._skip_ids, log=self.log)
+            apply_fixed_to_skip_points(self._skip_points, log=self.log)
             if self._runner is not None:
                 apply_fixed_to_skip_ids(self._runner.skip_ids(), log=lambda _m: None)
+                apply_fixed_to_skip_points(self._runner.skip_points(), log=lambda _m: None)
         except Exception:
             n = 0
         self._set_status_line(f"运行黑名单已清 · 固定保留 {n}")
@@ -1726,6 +1735,7 @@ class SuperLootPage(FeaturePage):
             return
         from app.core.loot_fixed_blacklist import (
             apply_fixed_to_skip_ids,
+            apply_fixed_to_skip_points,
             fixed_blacklist_path,
             freeze_runtime_blacklist,
         )
@@ -1748,8 +1758,10 @@ class SuperLootPage(FeaturePage):
                 log=self.log,
             )
             apply_fixed_to_skip_ids(self._skip_ids, log=self.log)
+            apply_fixed_to_skip_points(self._skip_points, log=self.log)
             if self._runner is not None:
                 apply_fixed_to_skip_ids(self._runner.skip_ids(), log=lambda _m: None)
+                apply_fixed_to_skip_points(self._runner.skip_points(), log=lambda _m: None)
             path = fixed_blacklist_path()
             self._set_status_line(f"已固化黑名单 {total} 个")
             self._append_status_log(f"固化黑名单 {total} 个 → {path}")
@@ -2030,9 +2042,13 @@ class SuperLootPage(FeaturePage):
         )
         # inherit UI + fixed blacklist into runner
         try:
-            from app.core.loot_fixed_blacklist import apply_fixed_to_skip_ids
+            from app.core.loot_fixed_blacklist import (
+                apply_fixed_to_skip_ids,
+                apply_fixed_to_skip_points,
+            )
 
             apply_fixed_to_skip_ids(self._skip_ids, log=lambda _m: None)
+            apply_fixed_to_skip_points(self._skip_points, log=lambda _m: None)
         except Exception:
             pass
         for k, v in list(self._skip_ids.items()):

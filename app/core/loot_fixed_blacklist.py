@@ -136,6 +136,41 @@ def apply_fixed_to_skip_ids(
     return n
 
 
+def apply_fixed_to_skip_points(
+    skip_points: list[tuple[float, float, float]],
+    *,
+    entries: list[dict[str, Any]] | None = None,
+    log: LogFn | None = None,
+) -> int:
+    """
+    Merge fixed entries into runtime skip_points (far-future expire).
+
+    Each fixed XZ becomes a proximity point so drifted-coordinate / new-obj_id
+    chests are still filtered within unreachable_near_m. Dedupe by XZ so
+    repeated reloads (start/clear/freeze) do not grow the list unboundedly.
+    @author by ak
+    """
+    log = log or (lambda _m: None)
+    ents = entries if entries is not None else load_fixed_blacklist(log=log)
+    exp = time.time() + float(FIXED_EXPIRE_S)
+    seen = {(float(px), float(pz)) for px, pz, _e in skip_points}
+    n = 0
+    for ent in ents:
+        x = ent.get("x")
+        z = ent.get("z")
+        if x is None or z is None:
+            continue
+        fx, fz = float(x), float(z)
+        if (fx, fz) in seen:
+            continue
+        seen.add((fx, fz))
+        skip_points.append((fx, fz, exp))
+        n += 1
+    if n:
+        log(f"super_loot fixed-bl points={n}")
+    return n
+
+
 def target_to_fixed_entry(
     target: SuperLootTarget | dict,
     *,

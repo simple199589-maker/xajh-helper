@@ -143,7 +143,7 @@ DEFAULT_ISOLATED_MAX_ADJ_LOOT = DEFAULT_ISOLATED_MAX_ADJ
 DEFAULT_UNREACHABLE_S = 45.0
 # A path failure can survive an AOI refresh with a new object id.  Exclude the
 # same failed XZ and its immediate approach area, but not an entire dense field.
-DEFAULT_UNREACHABLE_NEAR_M = 1.5
+DEFAULT_UNREACHABLE_NEAR_M = 0.5
 PATH_FAILURE_BACKOFF_S = (30.0, 90.0, 300.0, 900.0, 1800.0)
 # Soft runtime bans below this remaining TTL are auto-purged when every scan hit
 # is filtered (recover open fields). Manual right-click uses ~3600s; path-stuck
