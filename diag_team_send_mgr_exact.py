@@ -91,13 +91,14 @@ def paths():
         root / "runtime" / "native" / "bin",
         root.parent / "native" / "bin",
     ]
-    dll = root / "native" / "bin" / "xajh_team_tap.dll"
-    injector = None
-    for d in candidates:
-        p = d / "xajh_inject.exe"
-        if p.is_file():
-            injector = p
-            break
+    dll = next(
+        (d / "xajh_team_tap.dll" for d in candidates if (d / "xajh_team_tap.dll").is_file()),
+        root / "native" / "bin" / "xajh_team_tap.dll",
+    )
+    injector = next(
+        (d / "xajh_inject.exe" for d in candidates if (d / "xajh_inject.exe").is_file()),
+        root / "native" / "bin" / "xajh_inject.exe",
+    )
     return dll, injector
 
 
@@ -309,6 +310,8 @@ def main():
             all_ok = all_ok and ok
 
         print(f"summary: {'PASS' if all_ok and results else 'FAIL'}")
+        if all_ok and results:
+            return
         if time.time() >= deadline:
             return
         time.sleep(1.0)
