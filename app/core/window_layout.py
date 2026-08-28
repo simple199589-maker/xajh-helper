@@ -412,8 +412,8 @@ def normalize_game_window_to_nearest_16x9(
     if current is None:
         return WindowNormalizeResult(False, reason="client_rect_unavailable", **base)
     dpi = get_window_dpi(hwnd)
-    mismatch = abs((current[0] / current[1]) - (16.0 / 9.0))
-    if mismatch <= ASPECT_16_9_TOL:
+    n = nearest_16x9_n(*current)
+    if current[0] == 16 * n and current[1] == 9 * n:
         return WindowNormalizeResult(
             True,
             reason="already_16x9",
@@ -423,8 +423,6 @@ def normalize_game_window_to_nearest_16x9(
             dpi=int(dpi),
             **base,
         )
-
-    n = nearest_16x9_n(*current)
     work = monitor_work_area(hwnd)
     if work is not None:
         avail_w = max(0, int(work[2] - work[0]))
@@ -577,13 +575,12 @@ def align_game_render_size_to_nearest_16x9(
         out["reason"] = "render_size_unavailable"
         return out
     out["before"] = (width, height)
-    if abs((width / height) - (16.0 / 9.0)) <= ASPECT_16_9_TOL:
+    n = nearest_16x9_n(width, height)
+    if width == 16 * n and height == 9 * n:
         out["ok"] = True
         out["reason"] = "already_16x9"
         out["after"] = (width, height)
         return out
-
-    n = nearest_16x9_n(width, height)
     work = _primary_work_area()
     if work is not None:
         avail_w = max(0, int(work[2] - work[0]) - RENDER_INI_CLAMP_MARGIN[0])

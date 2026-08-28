@@ -3594,6 +3594,20 @@ def drive_launcher_to_xajh(
             if main_hwnd:
                 _state("main")
                 u32.ShowWindow(_wt.HWND(main_hwnd), 9)
+                # 诊断：登录器窗口尺寸（选区页黑边排查）。
+                try:
+                    from app.core import win_utils
+                    from app.core.window_layout import get_client_size, get_window_dpi
+
+                    _mrect = win_utils.get_window_rect(main_hwnd)
+                    _mclient = get_client_size(main_hwnd)
+                    log(
+                        f"launcher main window hwnd=0x{int(main_hwnd):X} "
+                        f"dpi={get_window_dpi(main_hwnd)} rect={_mrect} "
+                        f"client={_mclient}"
+                    )
+                except Exception:
+                    pass
                 continue
 
         # (c) big start button — only when no blocking msgbox is visible

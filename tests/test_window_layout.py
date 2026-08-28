@@ -326,14 +326,18 @@ class Nearest16x9Tests(unittest.TestCase):
         self.assertEqual(fake.set_calls, [])
 
     def test_snap_near_16x9_within_tolerance_is_not_modified(self):
+        # 1366x768 纵横比接近 16:9 但非精确 16n x 9n（n=85 -> 1360x765）。
+        # 登录坐标按 1600x900 参考，非对齐尺寸会造成黑边/错位，必须吸附。
         fake = _FakeUser32(client=(1366, 768))
         with patch.object(win_utils, "user32", fake), patch.object(
             win_utils, "query_process_image_path", return_value=r"D:\game\xajh.exe"
         ):
             result = normalize_game_window_to_nearest_16x9(100, 7)
         self.assertTrue(result.ok)
-        self.assertFalse(result.changed)
-        self.assertEqual(result.reason, "already_16x9")
+        self.assertTrue(result.changed)
+        self.assertEqual(result.reason, "normalized")
+        self.assertEqual(result.target_client, (1360, 765))
+        self.assertEqual(result.after_client, (1360, 765))
 
     def test_snap_resizes_to_nearest_16x9_of_current_size(self):
         fake = _FakeUser32(client=(1700, 900))
