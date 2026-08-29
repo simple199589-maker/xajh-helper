@@ -4608,9 +4608,10 @@ def _schedule_wanzi_aoi_gate(
         },
     )
     last_decision_key = ""
+    last_detail_time = 0.0
 
     def _publish(result: dict) -> None:
-        nonlocal last_decision_key
+        nonlocal last_decision_key, last_detail_time
         if not _current():
             return
         state = update_wanzi_aoi_sample(pid, result, no_monster_confirm=1)
@@ -4621,7 +4622,7 @@ def _schedule_wanzi_aoi_gate(
             decision_key = "interrupt:no_selected"
             decision = f"停包（{radius_f:g}m内有怪但连续3s无选中）"
         elif state.get("known") and state.get("has_monster"):
-            decision_key = "send:monster:" + ",".join(f"{int(item):016X}" for item in (state.get("nearby_ids") or []))
+            decision_key = "send:monster"
             decision = f"放包（{radius_f:g}m内有怪）"
         elif state.get("known"):
             decision_key = "block:no_monster"
@@ -4629,9 +4630,12 @@ def _schedule_wanzi_aoi_gate(
         else:
             decision_key = "send:unknown"
             decision = "放包（AOI暂无有效结果）"
-        if decision_key == last_decision_key:
+        changed = decision_key != last_decision_key
+        if changed:
+            last_decision_key = decision_key
+        elif time.monotonic() - last_detail_time < 30.0:
             return
-        last_decision_key = decision_key
+        last_detail_time = time.monotonic()
         detail = (
             f"reason={state.get('reason') or '-'} "
             f"sample_known={int(bool(state.get('sample_known')))} "
@@ -6139,7 +6143,7 @@ def _arm_dungeon_target_guard(
             }
         with _DUNGEON_TARGET_GUARD_LOCK:
             _DUNGEON_TARGET_GUARD_ARMED.add(pid)
-        log("dungeon target guard: armed (packaged/per-role TID, AOI distance, 50m fence)")
+        log("dungeon target guard: armed (packaged/per-role TID, AOI distance, 30m fence)")
         return {"ok": True, "enabled": True, "note": result.note}
     except Exception as exc:
         log(f"dungeon target guard: arm err {exc}")
@@ -6282,39 +6286,8 @@ def start_hang(
             stop_youfeng_hang(session, log=log)
             if wanzi_reserved:
                 stop_wanzi_packet_hang(session, release=True, log=log)
-        hang_packet_started = bool((ret.get("start") or {}).get("ok"))
-        hang_running = False
-        try:
-            hang_probe = probe_hang_state_mem(session, log=log)
-            hang_running = bool(hang_probe.ok and hang_probe.on is True)
-        except Exception as exc:
-            log(f"hang start: 自动开怪实时挂机状态读取失败: {exc}")
-        auto_open_enabled = bool(
-            dungeon_mode and getattr(cfg, "auto_open_monster", False)
-        )
-        auto_open_eligible = bool(
-            auto_open_enabled
-            and not ret.get("skipped")
-            and (hang_packet_started or hang_running or ret.get("ok"))
-        )
-        log(
-            f"hang start: 自动开怪判定 enabled={auto_open_enabled} "
-            f"packet_started={hang_packet_started} hang_running={hang_running} "
-            f"eligible={auto_open_eligible}"
-        )
-        if auto_open_eligible:
-            try:
-                from app.core.wuzun_open_monster import start_wuzun_open_monster
-
-                ret["auto_open_monster"] = start_wuzun_open_monster(
-                    int(getattr(session, "pid", 0) or 0),
-                    int(hwnd or getattr(session, "hwnd", 0) or 0),
-                    int(getattr(cfg, "open_monster_rows", 0) or 0),
-                    log=log,
-                )
-            except Exception as exc:
-                ret["auto_open_monster"] = {"ok": False, "error": str(exc)}
-                log(f"hang start: 自动开怪 runner 启动失败: {exc}")
+        # 武尊自动开怪 不再在 _with_tips 中立即调用，
+        # 统一由 hang guard 在场景稳定后按需触发（首次+切换）。
         tips = hang_start_warnings(cfg)
         if tips:
             ret["warnings"] = tips
@@ -6437,6 +6410,40 @@ def _start_hang_unlocked(
                 )
                 log(f"hang start: {out['message']}")
                 return out
+            # StartAutoPlay 复制锚点时坐标可能未稳定导致 NaN，
+            # 立刻从 bridge 读到正确坐标补写。
+            try:
+                from app.core.xajh_bridge import ensure_bridge
+                from app.core.activity_auto import _wpm_f32
+
+                br = ensure_bridge(
+                    int(getattr(session, "pid", 0) or 0),
+                    log=log,
+                    inject_if_needed=False,
+                    hwnd=hwnd_i or None,
+                    force_reinject=False,
+                )
+                if br is not None:
+                    try:
+                        snap = br.host_snapshot(timeout_ms=2000)
+                        if snap.ok and snap.x is not None:
+                            ap_mem = resolve_cec_autoplay_rpm(session)
+                            ap = int(ap_mem.get("autoplay") or 0)
+                            if ap:
+                                _wpm_f32(session, ap + 0x10, float(snap.x))
+                                _wpm_f32(session, ap + 0x14, float(snap.y))
+                                _wpm_f32(session, ap + 0x18, float(snap.z))
+                                log(
+                                    "hang start: anchor repaired "
+                                    f"({snap.x:.1f}, {snap.y:.1f}, {snap.z:.1f})"
+                                )
+                    finally:
+                        try:
+                            br.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                log(f"hang start: anchor repair err {e}")
 
         ret = _send_hang_control_packet(
             session, HANG_START_PACKET, action="开启", log=log
@@ -6504,20 +6511,8 @@ def _start_hang_unlocked(
             log(f"hang start: pickup re-applied={bool(cfg.enable_pickup)}")
     except Exception as _me:
         log(f"hang start: post-start reapply err {_me}")
-    if out.get("ok") and dungeon_mode and bool(
-        getattr(cfg, "skip_dungeon_story", False)
-    ):
-        # Never block hang-on path: arm CG hooks after autoplay is already running.
-        try:
-            out["plot_skip"] = schedule_skip_dungeon_story_async(
-                session,
-                hwnd=hwnd_i,
-                delay_s=float(HANG_PLOT_SKIP_DELAY_S),
-                log=log,
-            )
-        except Exception as e:
-            out["plot_skip"] = {"ok": False, "error": str(e)}
-            log(f"hang start: plot skip schedule err {e}")
+    # 副本跳过剧情、武尊自动开怪 不再在开挂时立即调用，
+    # 统一由 hang guard 在场景稳定后按需触发（首次+切换）。
     if out.get("ok"):
         try:
             if temporary:
@@ -7519,7 +7514,9 @@ def start_hang_guard(
             _HANG_GUARD_SESSION_OWNED.discard(pid)
         _HANG_GUARD_DEATH_SEEN_TS.pop(pid, None)
         _HANG_GUARD_DEATH_MAINTAIN.discard(pid)
-        _HANG_GUARD_SCENE_REARM.discard(pid)
+        _HANG_GUARD_LAST_SCENE.pop(pid, None)
+        # 标记首次场景检查：第一个稳定 tick 触发副本跳过剧情 / 武尊开怪等
+        _HANG_GUARD_SCENE_REARM.add(pid)
         if startup_maintain:
             _HANG_GUARD_STARTUP_MAINTAIN.add(pid)
     if old_owned and old_session is not None and old_session is not guard_session:
@@ -7609,6 +7606,24 @@ def start_hang_guard(
                         f"scene={scene_id or '-'} reason={reason}"
                     )
                     _disable_dungeon_story_hook(guard_session, log=log)
+                # 武尊自动开怪：仅在武尊场景（1255/1541）启动，离开时停止
+                if dungeon_mode and bool(getattr(cfg_now, "auto_open_monster", False)):
+                    from app.core.wuzun_open_monster import (
+                        WUZUN_SCENE_IDS,
+                        start_wuzun_open_monster,
+                        stop_wuzun_open_monster,
+                    )
+
+                    is_wuzun = int(scene_id or 0) in WUZUN_SCENE_IDS
+                    if is_wuzun:
+                        start_wuzun_open_monster(
+                            pid,
+                            int(getattr(guard_session, "hwnd", 0) or 0),
+                            int(getattr(cfg_now, "open_monster_rows", 0) or 0),
+                            log=log,
+                        )
+                    else:
+                        stop_wuzun_open_monster(pid, log=log)
                 if _wanzi_direct_enabled(cfg_now):
                     # Scene already stable here; resume the direct sender.
                     # Do not write recovery slots or sleep on this thread.

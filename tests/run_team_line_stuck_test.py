@@ -113,7 +113,7 @@ def main():
     wanted_keys = {_name_key(n) for n in names}
 
     print("\n[3] 持续监测 (Ctrl+C 退出)...")
-    print(f"    判定: 自己停留>5s + 队友>15m → 卡队")
+    print(f"    判定: 自己停留>5s + 队友>动态阈值(3人=10m,4人=14m,5人=18m) → 卡队")
     print()
 
     last_own: tuple[float, float, float] | None = None
@@ -157,6 +157,8 @@ def main():
                 session, CLASS_PLAYER, radius=60.0, limit=96,
                 read_name=True, read_tid=False, log=lambda m: None,
             )
+            # 动态阈值：3人=10m, 4人=14m, 5人=18m
+            far_threshold = 10.0 + max(0, len(party) - 3) * 4.0
             far_names: list[str] = []
             near_names: list[str] = []
             for obj in (objects or []):
@@ -168,7 +170,7 @@ def main():
                 if x is None or z is None:
                     continue
                 dist = math.hypot(float(x) - float(own_xyz[0]), float(z) - float(own_xyz[2]))
-                if dist > 15.0:
+                if dist > far_threshold:
                     far_names.append(f"{name}({dist:.0f}m)")
                 else:
                     near_names.append(f"{name}({dist:.0f}m)")
@@ -183,7 +185,7 @@ def main():
             marker = " <<< 卡队!" if stuck else ""
             print(
                 f"  [{status}] 自己=({own_xyz[0]:.0f},{own_xyz[2]:.0f})  "
-                f"远({far_str}) 近({near_str}){marker}"
+                f"远(>{far_threshold:.0f}m: {far_str}) 近({near_str}){marker}"
             )
 
             if stuck:

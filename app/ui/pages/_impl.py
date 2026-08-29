@@ -14538,7 +14538,6 @@ class TaskPage(FeaturePage):
                         attach,
                         cfg,
                         hwnd=hwnd_i,
-                        temporary=bool(from_sync and mode_i == 1),
                         log=lambda m: self._push("log", m),
                     )
                 else:

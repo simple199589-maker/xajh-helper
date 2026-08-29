@@ -6096,7 +6096,7 @@ class DungeonUnstickGuard:
         if still_dur < 5.0:
             return
 
-        # 判定因子 2：AOI 中是否有队友 > 15m。
+        # 判定因子 2：AOI 中是否有队友超过动态阈值（3人=10m, 4人=14m, 5人=18m）。
         try:
             from app.core.team_ops import list_party_members
             from app.core.plg_objects import CLASS_PLAYER, list_class_objects
@@ -6104,6 +6104,9 @@ class DungeonUnstickGuard:
             party = list_party_members(session, fresh=True, log=lambda _m: None)
             if not party or len(party) < 2:
                 return
+            party_size = len(party)
+            # 线性增长：3人=10m, 4人=14m, 5人=18m
+            far_threshold = 10.0 + max(0, party_size - 3) * 4.0
             names: set[str] = set()
             for member in party:
                 if bool(member.get("is_self")):
@@ -6137,7 +6140,7 @@ class DungeonUnstickGuard:
                 if x is None or z is None:
                     continue
                 dist = math.hypot(float(x) - pos3[0], float(z) - pos3[2])
-                if dist > 15.0:
+                if dist > far_threshold:
                     has_far = True
                     break
         except Exception:
@@ -6191,6 +6194,9 @@ class DungeonUnstickGuard:
         """Low-frequency observation; never blocks the runner loop. @author by ak"""
         if self._rule is None or (self._stop is not None and self._stop.is_set()):
             return
+        # 组队跟随守护不依赖战斗监视器，必须放在 _ensure_armed 之前，
+        # 否则战斗监视器武装失败会导致跟随守护永久停摆。
+        self._follow_keepalive(session, pos=pos)
         if not self._ensure_armed(session):
             return
         try:
@@ -6203,8 +6209,6 @@ class DungeonUnstickGuard:
             return
         if self._moving:
             return
-        # 1928：组队跟随守护（跟随掉了就补上），与是否在卡点区无关。
-        self._follow_keepalive(session, pos=pos)
         if not (isinstance(pos, (tuple, list)) and len(pos) >= 3):
             # Coordinates unreadable: fail closed for this tick.
             self._reset_window()
