@@ -6415,6 +6415,29 @@ def _start_hang_unlocked(
             )
             log(f"hang start: {out['message']}")
             return out
+
+        # 副本模式：先写 mode=1，再调 StartAutoPlay 本地初始化状态机，
+        # 确保 snapshot / StateFollowTarget 等状态在封包发送前已就绪。
+        # 封包路径只通知服务器，不会初始化本地状态机，所以必须补这一刀。
+        if dungeon_mode:
+            from app.core.activity_auto import (
+                set_autoplay_mode as _set_mode_local,
+                start_autoplay_force,
+            )
+
+            _set_mode_local(session, int(cfg.mode), log=log)
+            force_ret = start_autoplay_force(
+                session, send_packet=False, log=log
+            )
+            out["force_start"] = force_ret
+            if not bool(force_ret.get("ok")):
+                out["ok"] = False
+                out["message"] = "副本模式本地 StartAutoPlay 失败: " + str(
+                    force_ret.get("error") or force_ret.get("note") or "unknown"
+                )
+                log(f"hang start: {out['message']}")
+                return out
+
         ret = _send_hang_control_packet(
             session, HANG_START_PACKET, action="开启", log=log
         )
