@@ -257,6 +257,87 @@ class HandlePleaveTests(unittest.TestCase):
         self.assertEqual(n, 1)
         self.assertEqual(len(leave_calls), 1)
 
+    def test_module_seen_dedups_across_instances(self) -> None:
+        """同一 pid 的多个页面实例共享去重：同一条命令只执行一次。"""
+        from app.core.private_team_link import private_seen_reset
+
+        private_seen_reset()
+        msg_id = make_msg_id()
+        raw = f"{DISPLAY_RECV_1.rsplit('：', 1)[0]}对你说：{build_master_pleave(msg_id)}"
+        leave_calls: list = []
+
+        class FakeWatch:
+            def poll_messages(self):
+                return [{"text": raw, "channel": 9, "tick_ms": 0}]
+
+        def fake_leave_team(session, *, log=None):
+            leave_calls.append(session)
+            return type("R", (), {"ok": True})()
+
+        roster = [{"name": "十丶三", "obj_id": 0x012B4001}]
+        common = dict(
+            session=object(),
+            watch=FakeWatch(),
+            roster=roster,
+            reply=False,
+            log=lambda m: None,
+        )
+        with (
+            patch("app.core.private_team_link.send_private_message"),
+            patch("app.core.team_ops.leave_team", fake_leave_team),
+        ):
+            n1 = handle_pleave_commands(35952, seen=None, **common)
+            n2 = handle_pleave_commands(35952, seen=None, **common)  # 另一实例
+        private_seen_reset()
+        self.assertEqual((n1, n2), (1, 0))
+        self.assertEqual(len(leave_calls), 1)
+
+    def test_lazy_session_factory(self) -> None:
+        """session 传惰性工厂：只在收到命令时挂载；失败则离队按失败处理。"""
+        msg_id = make_msg_id()
+        raw = f"{DISPLAY_RECV_1.rsplit('：', 1)[0]}对你说：{build_master_pleave(msg_id)}"
+        calls: list = []
+
+        class FakeWatch:
+            def poll_messages(self):
+                return [{"text": raw, "channel": 9, "tick_ms": 0}]
+
+        def fake_leave_team(session, *, log=None):
+            calls.append(("leave", session))
+            return type("R", (), {"ok": True})()
+
+        roster = [{"name": "十丶三", "obj_id": 0x012B4001}]
+        with (
+            patch("app.core.private_team_link.send_private_message"),
+            patch("app.core.team_ops.leave_team", fake_leave_team),
+        ):
+            # 工厂正常返回
+            n1 = handle_pleave_commands(
+                35952,
+                session=lambda: "ATTACHED",
+                watch=FakeWatch(),
+                roster=roster,
+                seen=set(),
+                reply=False,
+                log=lambda m: None,
+            )
+            # 工厂失败
+            def boom():
+                raise RuntimeError("attach fail")
+
+            n2 = handle_pleave_commands(
+                35952,
+                session=boom,
+                watch=FakeWatch(),
+                roster=roster,
+                seen=set(),
+                reply=False,
+                log=lambda m: None,
+            )
+        self.assertEqual(n1, 1)
+        self.assertEqual(calls, [("leave", "ATTACHED")])
+        self.assertEqual(n2, 1)  # 计数包含，但离队未执行
+
 
 if __name__ == "__main__":
     unittest.main()

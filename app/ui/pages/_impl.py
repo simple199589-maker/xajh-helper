@@ -11080,18 +11080,23 @@ class TaskPage(FeaturePage):
             )
             if not roster:
                 return
-            seen = getattr(self, "_private_seen", None)
-            if seen is None:
-                seen = self._private_seen = set()
             sess = self.selected_session()
             if sess is None:
                 return
+
+            def _lazy_attach():
+                # 惰性挂载：只在真正收到 PLEAVE 时 attach（open_attach_session
+                # 提供带 module_base 的会话；selected_session 缺 module_base
+                # 会让 leave_team 读不到队伍指针、误报"当前未组队"）。
+                from app.core.loot import open_attach_session
+
+                return open_attach_session(int(pid), log=lambda m: self._push("log", m))
+
             handle_pleave_commands(
                 int(pid),
-                sess,
+                _lazy_attach,
                 watch=watch,
                 roster=roster,
-                seen=seen,
                 reply=False,
                 log=lambda m: self._push("log", m),
             )

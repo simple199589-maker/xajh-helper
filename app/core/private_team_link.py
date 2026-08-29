@@ -42,6 +42,26 @@ PRIVATE_LEAVE_SETTLE_S = 5.0
 # 副控轮询周期 1.5s + 发送限频窗口，正常到达不会超过此值。@author by ak
 PRIVATE_LEAVE_STALE_S = 10.0
 
+# 已处理 msg_id 去重（按 pid 模块级共享）：同一游戏窗口可能有多个页面实例
+# 都在跑私聊 tick，去重必须跨实例才不会重复执行离队。@author by ak
+_SEEN_LOCK = threading.Lock()
+_SEEN_BY_PID: dict[int, set[str]] = {}
+
+
+def _seen_for(pid: int) -> set[str]:
+    with _SEEN_LOCK:
+        s = _SEEN_BY_PID.get(pid)
+        if s is None:
+            s = set()
+            _SEEN_BY_PID[pid] = s
+        return s
+
+
+def private_seen_reset() -> None:
+    """清空 msg_id 去重状态（测试/换号用）。@author by ak"""
+    with _SEEN_LOCK:
+        _SEEN_BY_PID.clear()
+
 _MSG_ID_RE = r"[0-9A-Za-z]{4,16}"
 # 副控回执：OK=1（已离队/本无队） / OK=0（离队失败）
 _PLEFT_RE = re.compile(
@@ -312,6 +332,9 @@ def handle_pleave_commands(
 ) -> int:
     """副控侧单次轮询：处理主控 PLEAVE —— 在队则离队。
 
+    session 可以是已挂载会话，也可以是**惰性工厂**（返回会话的可调用）：
+    只有真正收到有效 PLEAVE 时才会调用（省去每轮 tick 的 attach 开销）。
+    seen 缺省用模块级按 pid 共享的去重集合（跨页面实例幂等）。
     reply=True（默认）回 PLEFT 给命令来源（测试/诊断路径用）；生产副控
     主控不收回执，传 reply=False 免去私聊回执噪声。
     roster: 花名册（{name, obj_id}），用于校验命令来源并取得回执目标的
@@ -320,7 +343,7 @@ def handle_pleave_commands(
     @author by ak
     """
     log = log or (lambda _m: None)
-    seen = seen if seen is not None else set()
+    seen = seen if seen is not None else _seen_for(int(pid or 0))
     if leave_fn is None:
         from app.core.team_ops import leave_team as leave_fn
 
@@ -358,11 +381,22 @@ def handle_pleave_commands(
             seen.difference_update(sorted(seen)[:-32])
         handled += 1
         ok = False
-        try:
-            res = leave_fn(session, log=log)
-            ok = bool(getattr(res, "ok", True))
-        except Exception as e:
-            log(f"私聊 [离队] 执行失败: {e}")
+        sess = session
+        if callable(sess):
+            # 惰性挂载：此刻才 attach；失败则本次离队按失败处理。
+            try:
+                sess = sess()
+            except Exception as e:
+                sess = None
+                log(f"私聊 [离队] 会话挂载失败: {e}")
+        if sess is None:
+            log("私聊 [离队] 无可用会话，离队未执行")
+        else:
+            try:
+                res = leave_fn(sess, log=log)
+                ok = bool(getattr(res, "ok", True))
+            except Exception as e:
+                log(f"私聊 [离队] 执行失败: {e}")
         if reply:
             reply_text = build_slave_pleft(p["msg_id"], ok=ok)
             send_private_message(int(pid), master_rid, p["sender"], reply_text, log=log)
