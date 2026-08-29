@@ -119,7 +119,11 @@
   - 原聊天 hook 保留为调用观测和兼容兜底；v5 以唯一精确命中作为发送就绪依据，不要求先有聊天命中。
   - 发送走进程内共享内存 mailbox，由游戏进程内的 sender 线程调用原生聊天发送 wrapper，避免外部跨进程 thiscall 栈帧问题。
   - 若游戏进程里已驻留旧版 team_tap，需关闭并重启该游戏进程后才会加载 v5。
-  - 私聊仅已确认可被 chat tap 原始接收；私聊发送封包尚未转正式。
+  - 私聊收发已转正式：`0x60` 封包（双 rid + 双名字 + 文本），发送走 team_tap v5
+    mailbox（`send_private_message`），接收经 chat_tap ch=9（v3 DLL 私聊专用 ring，
+    旧版 v2 自动回退主 ring）。在此之上实现"组队前先离队"跨设备控制面：
+    主控整队前对名单私聊 `[主P]PLEAVE`，副控在队则离队并回 `[副G]PLEFT`；
+    副控由任务页周期监听，不依赖队内控/云控开关。详见 `docs/team-chat-private-v1.md`。
   - 详细签名、共享内存布局、构建产物和实机验证见 `docs/team-chat-send-mgr-v5.md`。
 
 ### 技能辅助

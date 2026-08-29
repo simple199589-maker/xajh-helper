@@ -102,6 +102,8 @@ _remote_hard_dead: set[int] = set()
 # thread, so keep a short per-pid scene generation fence here at the one common
 # entry point used by all remote_call_* facades.
 _SCENE_GATE_SETTLE_SEC = 1.2
+# 连续读不到 host 快照多少次才认定为场景切换；单次失败是桥接并发抖动。
+_SCENE_GATE_FAIL_STREAK = 3
 # A feature action usually performs several serialized CRT calls.  Reopening
 # the bridge and sampling the same UI-thread scene before every one made a
 # single click pay the bridge timeout repeatedly.  The session window already
@@ -123,7 +125,14 @@ def note_pid_scene_snapshot(
     scene_id: int | None,
     sampled_at: float | None = None,
 ) -> None:
-    """Feed one UI-thread host snapshot into the remote-call scene fence."""
+    """Feed one UI-thread host snapshot into the remote-call scene fence.
+
+    桥接是单 UI 线程资源，多调用方并发时 host_snapshot 的瞬时失败很常见；
+    这类抖动不能清零稳定窗（否则 settle 门永远关不上远端调用）。只有
+    scene_id 变化或连续多次读不到，才视为场景切换。
+
+    @author by ak
+    """
     pid = int(pid)
     now = time.monotonic() if sampled_at is None else float(sampled_at)
     sid = int(scene_id or 0)
@@ -131,14 +140,46 @@ def note_pid_scene_snapshot(
     with _scene_gate_lock:
         prev = dict(_scene_gate_state.get(pid) or {})
         prev_sid = int(prev.get("scene_id") or 0)
+        prev_ready = bool(prev.get("ready"))
+        prev_fail = int(prev.get("fail_streak") or 0)
         stable_since = float(prev.get("stable_since") or now)
-        if not ready or prev_sid != sid or not bool(prev.get("ready")):
+        if not ready:
+            if prev_ready and prev_sid and sid and sid != prev_sid:
+                # 读数给出了不同 scene_id：真实的切换证据，立即关门。
+                _scene_gate_state[pid] = {
+                    "ready": False,
+                    "scene_id": sid,
+                    "sampled_at": now,
+                    "stable_since": now,
+                    "fail_streak": prev_fail + 1,
+                }
+                return
+            if prev_ready and prev_fail + 1 < _SCENE_GATE_FAIL_STREAK:
+                # 吸收瞬时读数抖动：沿用上一次的就绪状态与稳定窗起点。
+                _scene_gate_state[pid] = {
+                    "ready": True,
+                    "scene_id": prev_sid,
+                    "sampled_at": now,
+                    "stable_since": stable_since,
+                    "fail_streak": prev_fail + 1,
+                }
+                return
+            _scene_gate_state[pid] = {
+                "ready": False,
+                "scene_id": sid,
+                "sampled_at": now,
+                "stable_since": now,
+                "fail_streak": prev_fail + 1,
+            }
+            return
+        if prev_sid != sid or not prev_ready:
             stable_since = now
         _scene_gate_state[pid] = {
-            "ready": ready,
+            "ready": True,
             "scene_id": sid,
             "sampled_at": now,
             "stable_since": stable_since,
+            "fail_streak": 0,
         }
 
 

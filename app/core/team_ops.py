@@ -4198,12 +4198,16 @@ class TeamFormService:
         store=None,
         on_slave_leave: Callable[[str], None] | None = None,
         on_slave_fly: Callable[[str], None] | None = None,
+        private_precheck_enabled: Callable[[], bool] | None = None,
         log: LogFn | None = None,
         status: Callable[[str], None] | None = None,
     ):
         self.store = store
         self.on_slave_leave = on_slave_leave or (lambda _members: None)
         self.on_slave_fly = on_slave_fly or (lambda _members: None)
+        # 私聊预检查开关（None=默认启用）。生产接 team_control_flag_enabled：
+        # 没开队内控（纯本机群控部署）时群控已能送达离队命令，跳过私聊省时。
+        self._private_precheck_enabled = private_precheck_enabled or (lambda: True)
         self.log = log or (lambda _m: None)
         self.status = status or (lambda _m: None)
 
@@ -4213,6 +4217,45 @@ class TeamFormService:
         if isinstance(t, dict):
             return str(t.get("name") or t.get("token") or t.get("obj_id") or "?")
         return str(t or "?")
+
+    @staticmethod
+    def _target_rid(t) -> int:
+        if isinstance(t, TeamMemberTarget):
+            return int(t.obj_id or 0)
+        if isinstance(t, dict):
+            return int(t.get("obj_id") or 0)
+        return 0
+
+    def _private_precheck_leave(self, session, targets) -> None:
+        """组队前私聊预检查：对名单逐个发"在队则离队"命令（PLEAVE）。
+
+        生产策略（2026-08-29 定）：只管发，不等回执 —— 副控收到就执行离队，
+        没收到、没离队都不阻断（后续邀请会兜底暴露未离队成员）。发送后固定
+        等待 PRIVATE_LEAVE_SETTLE_S 作为离队缓冲。
+        跨设备时群控（本机 IPC）不通、队内控依赖已组队 —— 私聊是组队前唯一
+        控制面。
+        @author by ak
+        """
+        pid = int(getattr(session, "pid", 0) or 0)
+        roster = [
+            {"name": self._target_label(t), "obj_id": self._target_rid(t)}
+            for t in (targets or [])
+            if self._target_rid(t)
+        ]
+        if not pid or not roster:
+            return
+        from app.core.private_team_link import (
+            PRIVATE_LEAVE_SETTLE_S,
+            notify_slaves_leave,
+        )
+
+        sent = notify_slaves_leave(pid, roster, log=self.log)
+        self.status(f"自动整队：离队缓冲 {PRIVATE_LEAVE_SETTLE_S:.0f}s…")
+        self.log(
+            f"team: 私聊预检查 sent={sent}/{len(roster)}，"
+            f"离队缓冲 {PRIVATE_LEAVE_SETTLE_S:.0f}s"
+        )
+        time.sleep(PRIVATE_LEAVE_SETTLE_S)
 
     def audit_party(
         self,
@@ -4270,6 +4313,12 @@ class TeamFormService:
                 detail={"reformed": False, "missing": [], "party": audit["party"]},
             )
 
+        if self._private_precheck_enabled():
+            self.status("自动整队：私聊预检查（在队先离队）…")
+            try:
+                self._private_precheck_leave(session, targets)
+            except Exception as e:
+                log(f"team: form private precheck err: {e}")
         self.status("自动整队：全员离队…")
         try:
             self.on_slave_leave(members)

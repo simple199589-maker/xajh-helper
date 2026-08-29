@@ -107,8 +107,41 @@ class RemoteRuntimeTests(unittest.TestCase):
         self.assertTrue(is_pid_scene_snapshot_stable(9876, settle_sec=1.0))
         note_pid_scene_snapshot(9876, host_present=True, scene_id=69)
         self.assertFalse(is_pid_scene_snapshot_stable(9876, settle_sec=1.0))
-        note_pid_scene_snapshot(9876, host_present=False, scene_id=0)
-        self.assertFalse(is_pid_scene_snapshot_stable(9876, settle_sec=0.0))
+
+    def test_scene_gate_absorbs_transient_snapshot_flaps(self) -> None:
+        """桥接并发读数的瞬时失败不应清零稳定窗（settle 门抖动修复）。@author by ak"""
+        now = remote_runtime.time.monotonic()
+        note_pid_scene_snapshot(
+            9877, host_present=True, scene_id=68, sampled_at=now - 5.0
+        )
+        self.assertTrue(is_pid_scene_snapshot_stable(9877, settle_sec=1.0))
+        # 两次瞬时读不到：沿用就绪状态，稳定窗不被清零。
+        note_pid_scene_snapshot(9877, host_present=False, scene_id=0)
+        self.assertTrue(is_pid_scene_snapshot_stable(9877, settle_sec=1.0))
+        note_pid_scene_snapshot(9877, host_present=False, scene_id=0)
+        self.assertTrue(is_pid_scene_snapshot_stable(9877, settle_sec=1.0))
+        # 连续第三次读不到：认定为场景切换，关门。
+        note_pid_scene_snapshot(9877, host_present=False, scene_id=0)
+        self.assertFalse(is_pid_scene_snapshot_stable(9877, settle_sec=0.0))
+        # 恢复读数后重新进入稳定窗。
+        note_pid_scene_snapshot(9877, host_present=True, scene_id=68)
+        self.assertFalse(is_pid_scene_snapshot_stable(9877, settle_sec=1.0))
+        self.assertTrue(is_pid_scene_snapshot_stable(9877, settle_sec=0.0))
+
+    def test_scene_gate_closes_on_scene_change_in_failed_sample(self) -> None:
+        """失败的采样若读出了不同 scene_id，立即视为切换。@author by ak"""
+        now = remote_runtime.time.monotonic()
+        note_pid_scene_snapshot(
+            9878, host_present=True, scene_id=68, sampled_at=now - 5.0
+        )
+        self.assertTrue(is_pid_scene_snapshot_stable(9878, settle_sec=1.0))
+        note_pid_scene_snapshot(9878, host_present=False, scene_id=69)
+        self.assertFalse(is_pid_scene_snapshot_stable(9878, settle_sec=0.0))
+
+    def test_scene_gate_first_sample_never_absorbed(self) -> None:
+        """从未就绪过的 pid 首个失败采样立即关门（保持 fail closed）。@author by ak"""
+        note_pid_scene_snapshot(9879, host_present=False, scene_id=0, sampled_at=10.0)
+        self.assertFalse(is_pid_scene_snapshot_stable(9879, settle_sec=0.0))
 
     def test_scene_snapshot_peek_returns_recent_generation(self) -> None:
         note_pid_scene_snapshot(9876, host_present=True, scene_id=74)

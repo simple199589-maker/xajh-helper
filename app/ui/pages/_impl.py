@@ -3400,16 +3400,16 @@ class SettingsPage(FeaturePage):
         self.cmb_task_role.pack(side=tk.LEFT, padx=(4, 12))
         self.cmb_task_role.bind("<<ComboboxSelected>>", self._on_role_combo)
 
-        self.var_cloud_enabled = tk.BooleanVar(
-            value=bool(self.settings.get("cloud_control_enabled"))
-        )
+        # 云控入口已下架（只删入口，功能保留）：不 pack 复选框/状态行，
+        # 状态强制 False（旧配置里存过开的也不会再连）。恢复入口 = 还原 pack。
+        self.var_cloud_enabled = tk.BooleanVar(value=False)
         self.chk_cloud_enabled = ttk.Checkbutton(
             row_role,
             text="启用云控",
             variable=self.var_cloud_enabled,
             command=self._on_cloud_ui_changed,
         )
-        self.chk_cloud_enabled.pack(side=tk.LEFT)
+        # self.chk_cloud_enabled.pack(side=tk.LEFT)  # 云控入口：已下架
         if self.settings.get("cloud_control_available") is False:
             self.var_cloud_enabled.set(False)
             self.chk_cloud_enabled.state(["disabled"])
@@ -3465,7 +3465,7 @@ class SettingsPage(FeaturePage):
             style="Panel.Mono.TLabel",
             wraplength=520,
         )
-        self.lbl_cloud_status.pack(anchor="w", pady=(2, 0))
+        # self.lbl_cloud_status.pack(anchor="w", pady=(2, 0))  # 云控入口：已下架
         self.var_team_control_status = tk.StringVar(value="")
         self.lbl_team_control_status = ttk.Label(
             box_role,
@@ -10194,6 +10194,14 @@ class TaskPage(FeaturePage):
             command=self._on_team_gather,
         )
         self.btn_team_gather.pack(side=tk.LEFT, padx=(4, 0))
+        self.btn_team_notify_leave = ttk.Button(
+            team_row2,
+            text="通知离队",
+            style="Compact.TButton",
+            width=9,
+            command=self._on_team_notify_leave,
+        )
+        self.btn_team_notify_leave.pack(side=tk.LEFT, padx=(4, 0))
         team_row3 = ttk.Frame(team_box, style="Panel.TFrame")
         team_row3.pack(fill=tk.X, pady=(4, 0))
         self.btn_team_follow_on = ttk.Button(
@@ -10963,6 +10971,12 @@ class TaskPage(FeaturePage):
         self._team_chat_tick_job = None
         pid = int(self._fixed_pid or 0)
         role = self._control_role()
+        # 私聊控制面（跨设备组队前预检查）：副控轮询主控 PLEAVE，不依赖队内控开关。
+        if pid and role == ROLE_SLAVE:
+            try:
+                self._private_link_tick(pid)
+            except Exception as e:
+                self._push("log", f"自动任务 [私聊] 轮询异常: {e}")
         try:
             team_enabled = team_control_flag_enabled(self.settings)
             if not pid or not team_enabled:
@@ -11036,6 +11050,53 @@ class TaskPage(FeaturePage):
                 self._team_chat_tick_job = self.after(1500, self._team_chat_tick)
             except Exception:
                 self._team_chat_tick_job = None
+
+    def _private_link_tick(self, pid: int) -> None:
+        """私聊控制面单次轮询（副控）：处理主控 PLEAVE，在队则离队并回执。
+
+        依赖：花名册（team_verified_roster，校验命令来源并取回执 rid）。
+        主控侧回执由 TeamFormService.request_slaves_leave 自行等待，此处跳过。
+        @author by ak
+        """
+        from app.core.private_team_link import PrivateChatWatch, handle_pleave_commands
+
+        if getattr(self, "_private_polling", False):
+            return
+        self._private_polling = True
+        try:
+            watch = getattr(self, "_private_watch", None)
+            if watch is None or watch.pid != int(pid) or not watch.ok:
+                try:
+                    if watch is not None:
+                        watch.close()
+                except Exception:
+                    pass
+                watch = PrivateChatWatch(pid)
+                self._private_watch = watch
+            if not watch.ok:
+                return
+            roster = list(
+                (self.settings or {}).get("team_verified_roster") or []
+            )
+            if not roster:
+                return
+            seen = getattr(self, "_private_seen", None)
+            if seen is None:
+                seen = self._private_seen = set()
+            sess = self.selected_session()
+            if sess is None:
+                return
+            handle_pleave_commands(
+                int(pid),
+                sess,
+                watch=watch,
+                roster=roster,
+                seen=seen,
+                reply=False,
+                log=lambda m: self._push("log", m),
+            )
+        finally:
+            self._private_polling = False
 
     def _record_team_slave_msg(self, sender: str, kind: str, msg: dict) -> None:
         """主控记录副控最近心跳/完成状态（按角色名）。@author by ak"""
@@ -14850,6 +14911,101 @@ class TaskPage(FeaturePage):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_team_notify_leave(self) -> None:
+        """通知离队：私聊 PLEAVE 通知名单内成员"在队则离队"。
+
+        与自动整队同权：需群控主控。只管发不等回执，发完固定等待
+        PRIVATE_LEAVE_SETTLE_S 离队缓冲。不依赖队内控 —— 跨设备、未组队时
+        都可用的手动入口。目标用 _verified_invite_targets（自动排除自己）。
+        @author by ak
+        """
+        self._save_team_settings()
+        self._refresh_team_control_buttons()
+        if bool(getattr(self, "_team_notify_leave_working", False)):
+            if hasattr(self, "var_team_status"):
+                self.var_team_status.set("通知离队进行中，请稍候")
+            self.log("自动任务 [通知离队] 忽略：进行中")
+            return
+        if not self._team_has_group_control():
+            if hasattr(self, "var_team_status"):
+                self.var_team_status.set("通知离队需群控主控")
+            self.log("自动任务 [通知离队] 拒绝：未开群控主控")
+            return
+        mounted = self._require_session()
+        if mounted is None:
+            if hasattr(self, "var_team_status"):
+                self.var_team_status.set("通知离队失败：未挂载")
+            return
+        if not self._team_member_text():
+            if hasattr(self, "var_team_status"):
+                self.var_team_status.set("请填写成员")
+            return
+        if not self._team_roster_ready(show_hint=True):
+            return
+        targets = [
+            {"name": str(t.name or ""), "obj_id": int(t.obj_id or 0)}
+            for t in (self._verified_invite_targets() or [])
+            if getattr(t, "obj_id", 0)
+        ]
+        if not targets:
+            if hasattr(self, "var_team_status"):
+                self.var_team_status.set("通知离队：名单无可通知目标，请先校验队伍")
+            self.log("自动任务 [通知离队] 名单无有效目标（先校验队伍）")
+            return
+
+        from app.core.private_team_link import PRIVATE_LEAVE_SETTLE_S
+
+        self._team_notify_leave_working = True
+        try:
+            if hasattr(self, "btn_team_notify_leave"):
+                self.btn_team_notify_leave.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+        if hasattr(self, "var_team_status"):
+            self.var_team_status.set(f"通知离队：发送 PLEAVE x{len(targets)}…")
+        self.log(
+            f"自动任务 [通知离队] start n={len(targets)} "
+            f"targets={[t['name'] for t in targets]}"
+        )
+        try:
+            self.user_log("操作：通知离队 · 私聊 PLEAVE（在队则离队）", category=CAT_CONTROL)
+        except Exception:
+            pass
+
+        def worker() -> None:
+            try:
+                from app.core.private_team_link import notify_slaves_leave
+
+                sent = notify_slaves_leave(
+                    int(mounted.pid),
+                    targets,
+                    log=lambda m: self._push("log", m),
+                )
+                if hasattr(self, "var_team_status"):
+                    self.var_team_status.set(
+                        f"通知离队：已发 {sent}/{len(targets)}，离队缓冲 {PRIVATE_LEAVE_SETTLE_S:.0f}s…"
+                    )
+                time.sleep(PRIVATE_LEAVE_SETTLE_S)
+                self._push(
+                    "team_status",
+                    f"通知离队完成：已发 {sent}/{len(targets)}（离队缓冲结束）",
+                )
+                self.log(
+                    f"自动任务 [通知离队] done sent={sent}/{len(targets)}"
+                )
+            except Exception as e:
+                self._push("log", f"自动任务 [通知离队] 失败: {e}")
+                self._push("team_status", f"通知离队失败: {e}")
+            finally:
+                self._team_notify_leave_working = False
+                try:
+                    if hasattr(self, "btn_team_notify_leave"):
+                        self.btn_team_notify_leave.configure(state=tk.NORMAL)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_team_gather(self) -> None:
         """
         召集：飞福州 → 当前点击账号发起组队跟随。
@@ -15649,6 +15805,8 @@ class TaskPage(FeaturePage):
                 ACTION_TEAM_LEAVE, 0, name="leave", members=str(members or "")
             ),
             on_slave_fly=self._publish_fuzhou_fly_sync,
+            # 没开队内控（纯本机群控）时群控已能送达离队命令，跳过私聊预检查。
+            private_precheck_enabled=lambda: team_control_flag_enabled(self.settings),
             log=lambda m: self._push("log", m),
             status=lambda m: self._push("team_status", m),
         )

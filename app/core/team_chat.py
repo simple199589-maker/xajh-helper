@@ -1064,6 +1064,116 @@ def build_team_chat_c2s(
     return bytes(out)
 
 
+PRIVATE_CHAT_CMD = 0x60  # 私聊 c2s 命令字节（实机抓包 2026-08-29，与队伍 0x4F 不同）
+
+# 私聊发送限频（服务端按发送者限频：小批量+冷却，与组队邀请 3/批 同量级）。
+# 保守取 3 条/10s 滑窗；窗口满时阻塞等待而非丢弃（控制面消息不能丢）。
+PRIVATE_SEND_WINDOW_MAX = 3
+PRIVATE_SEND_WINDOW_S = 10.0
+_PRIVATE_SEND_LOCK = threading.RLock()
+_PRIVATE_SEND_TS: dict[int, float] = {}
+_PRIVATE_SEND_CNT: dict[int, int] = {}
+
+
+def private_send_gate_reset() -> None:
+    """清空私聊发送限频窗口状态（测试用）。@author by ak"""
+    with _PRIVATE_SEND_LOCK:
+        _PRIVATE_SEND_TS.clear()
+        _PRIVATE_SEND_CNT.clear()
+
+
+def _private_send_gate(pid: int, *, log: LogFn | None = None) -> float:
+    """私聊发送限频门：每发送者滑窗 PRIVATE_SEND_WINDOW_MAX 条 /
+    PRIVATE_SEND_WINDOW_S 秒，窗口满时阻塞等待到放行。
+
+    返回本次调用累计等待的秒数（0 表示立即放行）。@author by ak
+    """
+    waited = 0.0
+    while True:
+        admitted = False
+        wait = 0.0
+        with _PRIVATE_SEND_LOCK:
+            now = time.time()
+            ts = _PRIVATE_SEND_TS.get(pid, 0.0)
+            cnt = _PRIVATE_SEND_CNT.get(pid, 0)
+            if now - ts >= PRIVATE_SEND_WINDOW_S:
+                _PRIVATE_SEND_TS[pid] = now
+                _PRIVATE_SEND_CNT[pid] = 0
+                ts, cnt = now, 0
+            if cnt < PRIVATE_SEND_WINDOW_MAX:
+                _PRIVATE_SEND_CNT[pid] = cnt + 1
+                admitted = True
+            else:
+                wait = max(0.05, PRIVATE_SEND_WINDOW_S - (now - ts))
+        if admitted:
+            return waited
+        if log is not None and waited == 0.0:
+            log(
+                f"私聊 [限频] {PRIVATE_SEND_WINDOW_MAX}条/{PRIVATE_SEND_WINDOW_S:.0f}s"
+                f" 窗口满，等待 {wait:.1f}s"
+            )
+        time.sleep(wait)
+        waited += wait
+
+
+def build_private_chat_c2s(
+    text: str,
+    sender_rid: int,
+    sender_name: str,
+    target_rid: int,
+    target_name: str,
+) -> bytes:
+    """构建私聊 c2s 明文封包（命令 0x60）。
+
+    布局（2026-08-29 实机抓包确认，十丶三→苦寒未曾来 ZCAP1 57B /
+    十丶三→初一 ZCAP2 51B 双样本定案）：
+      0x00      0x60                 cmd（私聊，区别于队伍 0x4F）
+      0x01      u8  total = len - 2
+      0x02..0x06 00*5
+      0x07      0x01
+      0x08..0x0B 00*4
+      0x0C..0x0F sender_rid          大端 u32（与队伍封包 identity 同序）
+      0x10..0x13 00*4
+      0x14..0x17 target_rid          大端 u32（私聊目标，核心字段）
+      0x18      u8 sender_name_bytes + sender_name UTF-16LE
+      …         u8 target_name_bytes + target_name UTF-16LE
+      …         00 00
+      …         u8 text_bytes + text UTF-16LE
+      tail      00 00
+
+    长度公式：total_len = 24 + (1+2n) + (1+2m) + 2 + (1+2k) + 2。
+    注意：本封包没有队伍封包的身份指纹字段（offset 6..9 是固定零/标志位），
+    发送时禁止走 _team_mailbox_send 的 ident 改写（patch_ident=False）。
+    @author by ak
+    """
+    import struct as _struct
+
+    s_name = str(sender_name or "").encode("utf-16-le")
+    t_name = str(target_name or "").encode("utf-16-le")
+    body = str(text or "").encode("utf-16-le")
+    if len(s_name) > 0xFF or len(t_name) > 0xFF:
+        raise ValueError("private chat name too long")
+    if not body:
+        raise ValueError("private chat empty text")
+    total = 24 + 1 + len(s_name) + 1 + len(t_name) + 2 + 1 + len(body) + 2
+    if total > 0xFF:
+        raise ValueError(f"private chat packet too long: {total}B > 255")
+    out = bytearray()
+    out += bytes([PRIVATE_CHAT_CMD, (total - 2) & 0xFF])   # 0x01 = len-2（与队伍封包同约定）
+    out += bytes(5)                            # 0x02..0x06
+    out += bytes([0x01])                       # 0x07
+    out += bytes(4)                            # 0x08..0x0B
+    out += _struct.pack(">I", int(sender_rid) & 0xFFFFFFFF)   # 0x0C..0x0F
+    out += bytes(4)                            # 0x10..0x13
+    out += _struct.pack(">I", int(target_rid) & 0xFFFFFFFF)   # 0x14..0x17
+    out += bytes([len(s_name) & 0xFF]) + s_name
+    out += bytes([len(t_name) & 0xFF]) + t_name
+    out += bytes(2)
+    out += bytes([len(body) & 0xFF]) + body
+    out += bytes(2)
+    return bytes(out)
+
+
 def _invalidate_send_mgr(pid: int) -> None:
     """Drop a sender pointer after native wrapper failure."""
     import ctypes
@@ -1089,12 +1199,19 @@ def _invalidate_send_mgr(pid: int) -> None:
         k32.UnmapViewOfFile(ctypes.c_void_p(view))
         k32.CloseHandle(h)
 
-def _team_mailbox_send(pid: int, plaintext: bytes, *, log: LogFn | None = None) -> dict:
+def _team_mailbox_send(
+    pid: int,
+    plaintext: bytes,
+    *,
+    patch_ident: bool = True,
+    log: LogFn | None = None,
+) -> dict:
     """通过 DLL 内 sender 线程（mailbox）发送聊天封包。
 
     Python 只把封包写入共享内存 send_req，游戏进程内的 sender 线程用正确
     thiscall 栈帧调用 wrapper 0x00D089B0 发送。绕开 remote_call 栈帧问题。
-    若 DLL 已捕获该角色身份前缀字节（2b <XX>），自动改写封包偏移 0x0B。
+    patch_ident=True（默认，队伍封包）时自动改写偏移 6..9 为本角色身份指纹；
+    私聊封包（0x60）没有该字段，必须传 patch_ident=False 避免破坏固定零位。
     @author by ak
     """
     import ctypes
@@ -1103,19 +1220,20 @@ def _team_mailbox_send(pid: int, plaintext: bytes, *, log: LogFn | None = None) 
     log = log or (lambda _m: None)
     if not plaintext or len(plaintext) > TEAM_SEND_MAX_LEN:
         return {"ok": False, "error": f"payload too long: {len(plaintext or b'')}"}
-    try:
-        i0, i1, i2 = _resolve_send_ident(pid)
-        hi = 0x01
-        rid = _cached_role_id(pid)
-        if rid:
-            hi = _role_id_high_byte(rid)
-        # 身份字节：offset 6 = 身份高位（(rid>>24)&0xFF），offset 7..9 = <i0> <i1> <i2>。
-        if len(plaintext) > 0x0A and (
-            plaintext[6:10] != bytes([hi, i0, i1, i2])
-        ):
-            plaintext = plaintext[:6] + bytes([hi, i0, i1, i2]) + plaintext[10:]
-    except Exception:
-        pass
+    if patch_ident:
+        try:
+            i0, i1, i2 = _resolve_send_ident(pid)
+            hi = 0x01
+            rid = _cached_role_id(pid)
+            if rid:
+                hi = _role_id_high_byte(rid)
+            # 身份字节：offset 6 = 身份高位（(rid>>24)&0xFF），offset 7..9 = <i0> <i1> <i2>。
+            if len(plaintext) > 0x0A and (
+                plaintext[6:10] != bytes([hi, i0, i1, i2])
+            ):
+                plaintext = plaintext[:6] + bytes([hi, i0, i1, i2]) + plaintext[10:]
+        except Exception:
+            pass
     send_mgr = resolve_send_mgr(pid, log=log)
     if not send_mgr:
         log("队内控 [发] 发送管理器精确扫描未命中（已等待2秒）")
@@ -1510,6 +1628,99 @@ def _resolve_send_ident(pid: int) -> tuple[int, int, int]:
     """
     ident, _ok = _resolve_send_ident_confirmed(pid)
     return ident
+
+
+# 角色名进程级缓存（pid → 名字），私聊封包需要双方名字字段。
+_NAME_CACHE: dict[int, str] = {}
+
+
+def cache_role_name(pid: int, name: str) -> None:
+    """预置/回写 pid 的角色名缓存（正式绑定后调用可省一次 CRT）。@author by ak"""
+    pid = int(pid or 0)
+    name = str(name or "").strip()
+    if pid and name:
+        _NAME_CACHE[pid] = name
+
+
+def _resolve_private_sender(pid: int, *, log: LogFn | None = None) -> tuple[int, str | None]:
+    """解析私聊发送方身份 (role_id, name)。
+
+    rid 复用队伍封包的解析链（_resolve_send_ident_confirmed 会回写 _RID_CACHE）；
+    name 走 GetHostPlayer + GetObjectName（CRT，调度门保护），成功后缓存。
+    @author by ak
+    """
+    log = log or (lambda _m: None)
+    rid = _cached_role_id(pid)
+    if not rid:
+        # 触发完整解析链（内部命中后回写 _RID_CACHE）。
+        try:
+            _resolve_send_ident_confirmed(pid)
+        except Exception:
+            pass
+        rid = _cached_role_id(pid)
+    name = _NAME_CACHE.get(int(pid or 0))
+    if not name:
+        try:
+            from app.core.loot import open_attach_session
+            from app.core.plg_ui import get_host_player_name
+
+            attach = open_attach_session(pid, log=lambda _m: None)
+            if attach is not None:
+                name = get_host_player_name(attach, log=log)
+                if name:
+                    cache_role_name(pid, name)
+        except Exception as e:
+            log(f"私聊 [发] 解析角色名失败: {e}")
+    return int(rid or 0), (name or None)
+
+
+def send_private_message(
+    pid: int,
+    target_rid: int,
+    target_name: str,
+    text: str,
+    *,
+    log: LogFn | None = None,
+) -> dict:
+    """向指定角色发送私聊文本（0x60 封包，team_tap mailbox 通道）。
+
+    未组队也可用 —— 跨设备自动整队前的控制面（预检查/离队通知）走这里。
+    返回 {ok, ret, mgr?, error?}；ok=True 表示封包已交给游戏内发送链路
+    （wrapper 返回 1），服务端是否投递以接收方 chat_tap ch=9 为准。
+    @author by ak
+    """
+    log = log or (lambda _m: None)
+    pid = int(pid or 0)
+    if not pid:
+        return {"ok": False, "error": "no pid"}
+    target_rid = int(target_rid or 0) & 0xFFFFFFFF
+    target_name = str(target_name or "").strip()
+    text = str(text or "")
+    if not target_rid or not target_name or not text:
+        return {"ok": False, "error": "bad target/text"}
+    rid, name = _resolve_private_sender(pid, log=log)
+    if not rid:
+        # 封包携带的 sender_rid 服务端会与会话校验；身份未就绪时发错包等于白发。
+        log("私聊 [发] 发送方 role_id 未解析，拒绝发送")
+        return {"ok": False, "error": "sender rid unresolved"}
+    if not name:
+        log("私聊 [发] 发送方名字未解析，拒绝发送")
+        return {"ok": False, "error": "sender name unresolved"}
+    try:
+        payload = build_private_chat_c2s(text, rid, name, target_rid, target_name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    # 服务端对私聊按发送者限频：窗口满时阻塞等待（控制面消息不能丢）。
+    _private_send_gate(pid, log=log)
+    res = _team_mailbox_send(pid, payload, patch_ident=False, log=log)
+    if res.get("ok"):
+        log(
+            f"私聊 [发] →{target_name}({target_rid:X}) {text!r} ok=True "
+            f"ret={res.get('ret')} mgr=0x{res.get('mgr', 0):X}"
+        )
+    else:
+        log(f"私聊 [发] →{target_name}({target_rid:X}) {text!r} ok=False {res.get('error')}")
+    return res
 
 
 def _start_sender(pid: int) -> None:

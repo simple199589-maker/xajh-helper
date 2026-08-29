@@ -3,10 +3,11 @@
 #include <stddef.h>
 
 #define CHAT_TAP_MAGIC 0x50415443u
-#define CHAT_TAP_VERSION 2u
+#define CHAT_TAP_VERSION 3u
 #define CHAT_TAP_CAPACITY 50u
 #define CHAT_TAP_TEXT_CHARS 256u
 #define CHAT_TAP_TEAM_CAPACITY 512u
+#define CHAT_TAP_PRIVATE_CAPACITY 512u
 
 enum { CHAT_TAP_INIT = 0, CHAT_TAP_ACTIVE = 1, CHAT_TAP_ERROR = 2 };
 
@@ -34,5 +35,16 @@ struct ChatTapShared {
   ChatTapEvent events[CHAT_TAP_CAPACITY];
   volatile uint32_t team_write_seq;
   ChatTapEvent team_events[CHAT_TAP_TEAM_CAPACITY];
+  // v3: 私聊专用 ring（channel==9）。主 ring 容量 50，战斗 ch=12 高频刷屏，
+  // 私聊控制消息（组队前预检查/离队回执）会被挤掉；专用 ring 与队伍 ring 同理。
+  volatile uint32_t private_write_seq;
+  ChatTapEvent private_events[CHAT_TAP_PRIVATE_CAPACITY];
 };
 #pragma pack(pop)
+
+static_assert(sizeof(ChatTapEvent) == 540, "ChatTapEvent layout mismatch");
+static_assert(offsetof(ChatTapShared, team_write_seq) == 27156,
+              "team ring offset mismatch");
+static_assert(offsetof(ChatTapShared, private_write_seq) == 303640,
+              "private ring offset mismatch");
+static_assert(sizeof(ChatTapShared) == 580124, "ChatTapShared v3 size mismatch");

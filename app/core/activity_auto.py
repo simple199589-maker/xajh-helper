@@ -3878,6 +3878,7 @@ def start_autoplay_force(
     *,
     send_packet: bool = False,
     log: LogFn | None = None,
+    force: bool = False,
 ) -> dict:
     """
     强开挂机：直接 thiscall CECAutoPlay::StartAutoPlay (0xC5ABE0)。
@@ -3886,6 +3887,8 @@ def start_autoplay_force(
     - 与包响应 DB9130 同路径：ecx=autoplay → call Start → [ap+0x08]=1
     - send_packet=True 时额外 cdecl 调 Game_StartAutoPlay 包 0xCCA150（cmd 0x15），
       更接近 tip 发网流程；默认 False，纯本地开挂更稳、无技能依赖
+    - force=True 时跳过 "already running" 提前返回：用于副本模式机器卡
+      StateAlert 时的本地重初始化（重跑 StartAutoPlay 把机器置回 StateAttack）。
 
     @author by ak
     """
@@ -3909,7 +3912,7 @@ def start_autoplay_force(
     if not mem.get("ok") or not ap:
         out["error"] = str(mem.get("error") or "autoplay unresolved")
         return out
-    if mem.get("running") is True:
+    if mem.get("running") is True and not force:
         out["ok"] = True
         out["after_running"] = True
         out["error"] = None

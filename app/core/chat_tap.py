@@ -11,16 +11,23 @@ from pathlib import Path
 from typing import Callable
 
 CHAT_TAP_MAGIC = 0x50415443
-CHAT_TAP_VERSION = 2
+CHAT_TAP_VERSION = 3
 CHAT_TAP_CAPACITY = 50
 CHAT_TAP_TEXT_CHARS = 256
 CHAT_TAP_HEADER_SIZE = 156
 CHAT_TAP_EVENT_SIZE = 540
-CHAT_TAP_SHARED_SIZE = 303640
+# v3 = 主ring + 队伍ring + 私聊ring（channel==9），总尺寸 580124。
+CHAT_TAP_SHARED_SIZE = 580124
 # 队伍专用 ring（channel==3，主副控稳定读取）
 TEAM_TAP_CAPACITY = 512
 TEAM_TAP_WRITE_SEQ_OFF = 27156  # 主 events 之后
 TEAM_TAP_EVENTS_OFF = 27160
+# 私聊专用 ring（channel==9，组队前控制面：预检查/离队回执）
+PRIVATE_TAP_CAPACITY = 512
+PRIVATE_TAP_WRITE_SEQ_OFF = 303640  # 队伍 events 之后
+PRIVATE_TAP_EVENTS_OFF = 303644
+# v2 旧布局尺寸（无私聊 ring）。读取端兼容旧 DLL：主/队伍 ring 与 v3 完全同位。
+CHAT_TAP_LEGACY_SIZE = 303640
 
 CHAT_TAP_INIT = 0
 CHAT_TAP_ACTIVE = 1
@@ -56,7 +63,7 @@ def parse_chat_tap_snapshot(
     data: bytes, cursor: int
 ) -> tuple[list[dict], int, int, dict]:
     """Parse committed ring entries after cursor from one atomic copy."""
-    if len(data) < CHAT_TAP_SHARED_SIZE:
+    if len(data) < CHAT_TAP_LEGACY_SIZE:
         raise ValueError("chat tap mapping is truncated")
     magic, version, size, capacity, newest, status, target_va, error = (
         _HEADER.unpack_from(data, 0)
@@ -74,7 +81,10 @@ def parse_chat_tap_snapshot(
     }
     if magic != CHAT_TAP_MAGIC:
         raise ValueError(f"chat tap magic mismatch: 0x{magic:08X}")
-    if version != CHAT_TAP_VERSION or size != CHAT_TAP_SHARED_SIZE:
+    if version == 2 and size == CHAT_TAP_LEGACY_SIZE:
+        # v2 旧布局（无私聊 ring）：主/队伍 ring 与 v3 同位，允许直接解析。
+        pass
+    elif version != CHAT_TAP_VERSION or size != CHAT_TAP_SHARED_SIZE:
         raise ValueError(f"chat tap layout mismatch: version={version} size={size}")
     if capacity != CHAT_TAP_CAPACITY:
         raise ValueError(f"chat tap capacity mismatch: {capacity}")
@@ -163,31 +173,93 @@ def parse_team_events(
     return events, consumed, lost, header
 
 
+def parse_private_events(
+    data: bytes, cursor: int
+) -> tuple[list[dict], int, int, dict]:
+    """解析私聊专用 ring（channel==9）cursor 之后的新消息。
+
+    布局与队伍 ring 完全同构，仅偏移/容量不同。
+    @author by ak
+    """
+    if len(data) < CHAT_TAP_SHARED_SIZE:
+        raise ValueError("chat tap mapping is truncated")
+    newest = int.from_bytes(
+        data[PRIVATE_TAP_WRITE_SEQ_OFF : PRIVATE_TAP_WRITE_SEQ_OFF + 4], "little"
+    )
+    header = {"private_write_seq": newest, "capacity": PRIVATE_TAP_CAPACITY}
+    mark = max(0, int(cursor or 0))
+    if newest <= mark:
+        return [], mark, 0, header
+    oldest = max(1, int(newest) - int(PRIVATE_TAP_CAPACITY) + 1)
+    start = max(mark + 1, oldest)
+    lost = max(0, oldest - (mark + 1))
+    events: list[dict] = []
+    consumed = start - 1
+    for expected in range(start, int(newest) + 1):
+        slot = (expected - 1) % int(PRIVATE_TAP_CAPACITY)
+        offset = PRIVATE_TAP_EVENTS_OFF + slot * CHAT_TAP_EVENT_SIZE
+        seq, tick_ms, thread_id, caller_va, channel, flags, text_len = (
+            _EVENT_META.unpack_from(data, offset)
+        )
+        if seq != expected:
+            break
+        chars = min(int(text_len), CHAT_TAP_TEXT_CHARS - 1)
+        raw = data[offset + _EVENT_META.size : offset + _EVENT_META.size + chars * 2]
+        text = raw.decode("utf-16-le", errors="replace")
+        events.append(
+            {
+                "seq": seq,
+                "tick_ms": tick_ms,
+                "thread_id": thread_id,
+                "caller_va": caller_va,
+                "channel": channel,
+                "flags": flags,
+                "text": text,
+            }
+        )
+        consumed = expected
+    return events, consumed, lost, header
+
+
 class ChatTapReader:
-    def __init__(self, pid: int, handle: int, view: int):
+    def __init__(
+        self,
+        pid: int,
+        handle: int,
+        view: int,
+        *,
+        size: int = CHAT_TAP_SHARED_SIZE,
+        legacy: bool = False,
+    ):
         self.pid = int(pid)
         self._handle = handle
         self._view = view
+        self._size = int(size)
+        # legacy=True：v2 旧 DLL（无私聊 ring），只有主/队伍 ring 可读。
+        self.legacy = bool(legacy)
 
     @classmethod
     def open(cls, pid: int) -> "ChatTapReader | None":
-        for scope in ("Local", "Global"):
-            name = f"{scope}\\XajhChatTap_{int(pid)}"
-            handle = kernel32.OpenFileMappingW(FILE_MAP_READ, False, name)
-            if not handle:
-                continue
-            view = kernel32.MapViewOfFile(
-                handle, FILE_MAP_READ, 0, 0, CHAT_TAP_SHARED_SIZE
-            )
-            if view:
-                return cls(int(pid), handle, view)
-            kernel32.CloseHandle(handle)
+        # 先按 v3 尺寸映射；失败（旧 DLL 小映射）回退 v2 尺寸。
+        for size, legacy in (
+            (CHAT_TAP_SHARED_SIZE, False),
+            (CHAT_TAP_LEGACY_SIZE, True),
+        ):
+            for scope in ("Local", "Global"):
+                name = f"{scope}\\XajhChatTap_{int(pid)}"
+                handle = kernel32.OpenFileMappingW(FILE_MAP_READ, False, name)
+                if not handle:
+                    continue
+                view = kernel32.MapViewOfFile(handle, FILE_MAP_READ, 0, 0, size)
+                if view:
+                    return cls(int(pid), handle, view, size=size, legacy=legacy)
+                kernel32.CloseHandle(handle)
         return None
 
     def snapshot(self) -> bytes:
         if not self._view:
             raise RuntimeError("chat tap reader is closed")
-        return ctypes.string_at(self._view, CHAT_TAP_SHARED_SIZE)
+        return ctypes.string_at(self._view, self._size)
 
     def header(self) -> dict:
         return parse_chat_tap_snapshot(self.snapshot(), 0)[3]
@@ -206,6 +278,20 @@ class ChatTapReader:
     def latest_team_cursor(self) -> int:
         return int.from_bytes(
             self.snapshot()[TEAM_TAP_WRITE_SEQ_OFF : TEAM_TAP_WRITE_SEQ_OFF + 4],
+            "little",
+        )
+
+    def read_private_after(self, cursor: int) -> tuple[list[dict], int, int, dict]:
+        """读私聊专用 ring（channel==9）新增消息。@author by ak"""
+        if self.legacy:
+            raise RuntimeError("chat tap v2 无私聊专用 ring")
+        return parse_private_events(self.snapshot(), cursor)
+
+    def latest_private_cursor(self) -> int:
+        if self.legacy:
+            raise RuntimeError("chat tap v2 无私聊专用 ring")
+        return int.from_bytes(
+            self.snapshot()[PRIVATE_TAP_WRITE_SEQ_OFF : PRIVATE_TAP_WRITE_SEQ_OFF + 4],
             "little",
         )
 

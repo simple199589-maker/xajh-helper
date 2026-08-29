@@ -8,10 +8,11 @@
 
 // Inline struct definitions (no external header dependency).
 #define CT_MAGIC 0x50415443u
-#define CT_VERSION 2u
+#define CT_VERSION 3u
 #define CT_CAPACITY 50u
 #define CT_TEXT_CHARS 256u
 #define CT_TEAM_CAPACITY 512u
+#define CT_PRIVATE_CAPACITY 512u
 
 #pragma pack(push, 1)
 struct CTEvent {
@@ -36,6 +37,8 @@ struct CTShared {
   CTEvent events[CT_CAPACITY];
   volatile uint32_t team_write_seq;
   CTEvent team_events[CT_TEAM_CAPACITY];
+  volatile uint32_t private_write_seq;
+  CTEvent private_events[CT_PRIVATE_CAPACITY];
 };
 #pragma pack(pop)
 
@@ -110,6 +113,7 @@ static void Capture(const wchar_t* text, uint32_t ch, uint32_t caller) {
       __try {
         PushEv(g_ring->events, &g_ring->write_seq, CT_CAPACITY, local, len, ch, caller);
         if (ch == 3) PushEv(g_ring->team_events, &g_ring->team_write_seq, CT_TEAM_CAPACITY, local, len, ch, caller);
+        if (ch == 9) PushEv(g_ring->private_events, &g_ring->private_write_seq, CT_PRIVATE_CAPACITY, local, len, ch, caller);
       } __except (EXCEPTION_EXECUTE_HANDLER) {}
       InterlockedExchange(&g_lock, 0);
       return;
