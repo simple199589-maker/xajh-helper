@@ -11079,6 +11079,17 @@ class TaskPage(FeaturePage):
                 (self.settings or {}).get("team_verified_roster") or []
             )
             if not roster:
+                # 打包首跑场景：本窗口水合早于主控"校验队伍"，内存无花名册。
+                # 回退读盘（team_prefs.json），校验完成下一轮 tick 自动生效。
+                try:
+                    from app.core.team_ops import load_team_prefs
+
+                    roster = list(
+                        (load_team_prefs() or {}).get("team_verified_roster") or []
+                    )
+                except Exception:
+                    roster = []
+            if not roster:
                 return
             sess = self.selected_session()
             if sess is None:

@@ -378,10 +378,15 @@ def _qiegao_active_peer_nearby(
 def _qiegao_prefs_path() -> Path:
     """Disk prefs for qiegao main/alt AFK slots (survive restart). @author by ak"""
     try:
-        base = Path(__file__).resolve().parents[2] / "runtime" / "config"
+        from common.paths import ensure_writable_dir
+
+        base = ensure_writable_dir("runtime", "config")
     except Exception:
-        base = Path.cwd() / "runtime" / "config"
-    return base / "qiegao_prefs.json"
+        try:
+            base = Path(__file__).resolve().parents[2] / "runtime" / "config"
+        except Exception:
+            base = Path.cwd() / "runtime" / "config"
+    return Path(base) / "qiegao_prefs.json"
 
 
 def default_qiegao_afk_xyz() -> tuple[float, float, float]:

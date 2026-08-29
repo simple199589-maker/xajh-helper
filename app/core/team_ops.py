@@ -3359,10 +3359,15 @@ def invite_targets_for_members(
 def _team_prefs_path() -> Path:
     """Disk path for team roster + verified id cache. @author by ak"""
     try:
-        base = Path(__file__).resolve().parents[2] / "runtime" / "config"
+        from common.paths import ensure_writable_dir
+
+        base = ensure_writable_dir("runtime", "config")
     except Exception:
-        base = Path.cwd() / "runtime" / "config"
-    return base / "team_prefs.json"
+        try:
+            base = Path(__file__).resolve().parents[2] / "runtime" / "config"
+        except Exception:
+            base = Path.cwd() / "runtime" / "config"
+    return Path(base) / "team_prefs.json"
 
 
 def load_team_prefs() -> dict:
