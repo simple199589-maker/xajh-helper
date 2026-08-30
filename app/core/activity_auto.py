@@ -1164,6 +1164,10 @@ class ActivityConfig:
     qiegao_return_peer_wait_s: float = 30.0
     # 挂机热键切换后的沉降等待（关/开之间）。
     qiegao_hang_settle_s: float = 0.9
+    # 挂机状态读取未知时的重试（过图窗口 CECAutoPlay 可能尚未重建/读延迟）；
+    # 重试后仍未知按幂等 stop 直接关（统一管线封包直发，无误开风险）。
+    hang_probe_retries: int = 2
+    hang_probe_retry_s: float = 1.0
     # 副本倒计时剩余 ≤ 该值(秒)时关闭内挂，等待系统送出副本；0 = 不提前关。
     qiegao_stop_hang_before_end_s: float = 30.0
     # 寻路已到位后再确认一段时间，防止移动收尾时过早开挂机。
@@ -8203,8 +8207,10 @@ class ActivityRunner:
         keep_task_guard: bool = False,
     ) -> bool:
         """
-        关闭挂机：统一走 hang_settings.stop_hang。
+        关闭挂机：统一走 hang_settings.stop_hang（封包直发，幂等）。
 
+        状态未知时短暂重读（过图窗口 CECAutoPlay 可能尚未重建）；
+        重试后仍未知也直接走统一管线关挂（stop 封包幂等，无误开风险）。
         自动判定无技能（cfg / 内存推断 / Alt+R 失败 force 兜底）。
 
         @author by ak
@@ -8218,6 +8224,19 @@ class ActivityRunner:
             return False
 
         on = self._read_hang_on(sess)
+        # 未知通常是时机问题（过图窗口 CECAutoPlay 尚未重建/读延迟）：
+        # 短暂重试等对象回来再判定，而不是把「时机未到」当成「维持现状」。
+        if on is None and not force:
+            retries = max(0, int(getattr(self.cfg, "hang_probe_retries", 2) or 0))
+            retry_s = max(
+                0.2, float(getattr(self.cfg, "hang_probe_retry_s", 1.0) or 1.0)
+            )
+            for _ in range(retries):
+                if not _sleep_interruptible(retry_s, self._stop):
+                    return False
+                on = self._read_hang_on(sess)
+                if on is not None:
+                    break
         # force=True（停止/无技能）时即使读成关也再 stop 一次：
         # 读失败或 force-open 与 running 字节不同步时，跳过会关不掉。
         if on is False and not force:
@@ -8233,15 +8252,14 @@ class ActivityRunner:
                 except Exception:
                     pass
             return True
-        if on is None and not force and self._hang_likely_on is not True:
+        if on is None and not force:
+            # stop_hang 走统一管线封包直发（幂等，已关时再发无副作用）：
+            # 重试后仍未知也直接关，杜绝内挂实际开着却带着开挂寻路。
             self._emit(
                 "afk_hang",
-                f"{tag}：挂机状态未知，跳过盲切（避免误开）",
+                f"{tag}：挂机状态重试后仍未知，直接走统一管线关挂",
                 ok=True,
             )
-            if keep_task_guard:
-                self._ensure_qiegao_task_guard(sess)
-            return False
 
         hcfg = getattr(self, "_hang_cfg_used", None) or self._resolve_hang_cfg(sess)
         # 若本轮用过无技能，或页勾选无技能，保证 stop 走 force
@@ -9582,14 +9600,55 @@ class ActivityRunner:
 
         if is_dungeon_scene(sid, label, gate=cfg.city_gate):
             if self._is_qiegao_mode():
-                # 主号已在本内：不过图等待，直接切糕挂机（寻路/开挂机）。
+                # 主号已在本内：可能刚启动/正处于过图窗口，仍先做过图稳定
+                # 等待再检测关挂/寻路，避免过图未完成就读挂机态。
                 self._emit(
                     "afk_move",
-                    f"当前已在副本 {label}，跳过过图等待，直接切糕挂机",
+                    f"当前已在副本 {label}，先等待过图稳定再切糕挂机",
                     ok=True,
                     scene_id=sid,
                     scene_label=label,
                 )
+                ready = wait_map_ready(
+                    session,
+                    cfg,
+                    stop_event=self._stop,
+                    log=self.log,
+                    status=self._status,
+                    require_dungeon=True,
+                )
+                if self._stop.is_set():
+                    self._emit("stop", "过图等待中断", ok=False)
+                    return
+                sid, _pos, label = read_scene_state(
+                    session, fresh=True, log=self.log
+                )
+                if not is_dungeon_scene(sid, label, gate=cfg.city_gate):
+                    self._fail_count += 1
+                    self._emit(
+                        "enter_fail",
+                        f"已在本内路径过图等待后不在副本 scene={label or sid}",
+                        ok=False,
+                        scene_id=sid,
+                        scene_label=label,
+                    )
+                    return
+                if ready:
+                    self._emit(
+                        "afk_wait",
+                        f"过图完成，已在副本 {label}，开始切糕挂机",
+                        ok=True,
+                        scene_id=sid,
+                        scene_label=label,
+                    )
+                else:
+                    self._emit(
+                        "afk_wait",
+                        f"过图等待超时，但仍在副本 {label}，继续切糕挂机",
+                        ok=True,
+                        scene_id=sid,
+                        scene_label=label,
+                    )
                 if not self._qiegao_start_hang_phase(session):
                     self._emit("stop", "切糕挂机/回城中断", ok=False)
                     return

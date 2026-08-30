@@ -45,7 +45,8 @@ check("BRIDGE_BUILD_ID 单源一致（py vs h）",
 check("CMD_AUTOPLAY_DRIVE_ATTACK = 57 两侧注册",
       "AUTOPLAY_DRIVE_ATTACK = 57" in bp_py and "CMD_AUTOPLAY_DRIVE_ATTACK = 57" in bp_h)
 check("能力映射注册", "AUTOPLAY_DRIVE_ATTACK: BridgeCapability.AUTOPLAY" in bp_py)
-check("动作名注册", 'AUTOPLAY_DRIVE_ATTACK: "autoplay.drive"' in bp_py)
+check("能力映射唯一（误挂 build 门会被 profile 硬拒）",
+      bp_py.count("BridgeCommand.AUTOPLAY_DRIVE_ATTACK: ") == 1)
 
 # ---------- 2. 开挂链（_start_hang_unlocked） ----------
 section("2. 开挂链")
@@ -110,6 +111,14 @@ inv = read("app/core/native_inventory.py")
 check("清单无 stamped", "stamped_bridge_name" not in inv)
 bat = read("native/xajh_bridge/build_x86.bat")
 check("构建无版本号副本", "xajh_bridge_%BRIDGE_BUILD_ID%.dll" not in bat)
+staged_leftovers = sorted(
+    p.name
+    for d in ("runtime/native/bin", "native/bin", "build/native")
+    for p in (ROOT / d).glob("xajh_bridge_*.dll")
+)
+check("磁盘无 stamped 桥遗留（stage/输出目录）", not staged_leftovers,
+      ", ".join(staged_leftovers[:5]) if staged_leftovers else "")
+check("stage 自清理已接线", 'stage.glob("xajh_bridge_*.dll")' in xj)
 
 # ---------- 8. 调试红线（文档化确认） ----------
 section("8. 编译与测试")

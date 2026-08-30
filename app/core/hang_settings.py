@@ -7799,6 +7799,9 @@ def start_hang_guard(
             # 下个 tick 自然重试；成功（running 保持 True）才入队出清。
             # 连续失败超过 _SCENE_REARM_RETRY_MAX 视为放弃，交由
             # 看门狗的 Alert 粘滞告警兜底。
+            # 跳剧情/开怪/丸子是场景边动作，仅在终态（成功或放弃）执行
+            # 一次；rearm 未就绪期间不重放，避免重复排异步任务。
+            rearm_pending = False
             try:
                 known_dungeon, scene_id, reason = _stable_known_dungeon_scene(pid)
                 rearm_ok = True
@@ -7850,47 +7853,52 @@ def start_hang_guard(
                                 "hang guard: scene rearm re-init 放弃（重试上限），"
                                 "由 Alert 粘滞告警兜底"
                             )
-                if dungeon_mode and bool(getattr(cfg_now, "skip_dungeon_story", False)) and known_dungeon:
-                    # Scene-edge event only — queue off the guard tick thread.
-                    schedule_skip_dungeon_story_async(
-                        guard_session,
-                        hwnd=int(getattr(guard_session, "hwnd", 0) or 0),
-                        delay_s=float(HANG_PLOT_SKIP_DELAY_S),
-                        log=log,
-                    )
-                elif bool(getattr(cfg_now, "skip_dungeon_story", False)):
-                    log(
-                        "hang guard: plot skip not rearmed "
-                        f"scene={scene_id or '-'} reason={reason}"
-                    )
-                    _disable_dungeon_story_hook(guard_session, log=log)
-                # 武尊自动开怪：仅在武尊场景（1255/1541）启动，离开时停止
-                if dungeon_mode and bool(getattr(cfg_now, "auto_open_monster", False)):
-                    from app.core.wuzun_open_monster import (
-                        WUZUN_SCENE_IDS,
-                        start_wuzun_open_monster,
-                        stop_wuzun_open_monster,
-                    )
-
-                    is_wuzun = int(scene_id or 0) in WUZUN_SCENE_IDS
-                    if is_wuzun:
-                        start_wuzun_open_monster(
-                            pid,
-                            int(getattr(guard_session, "hwnd", 0) or 0),
-                            int(getattr(cfg_now, "open_monster_rows", 0) or 0),
+                        else:
+                            rearm_pending = True  # 下个 tick 只重试重初始化
+                if not rearm_pending:
+                    if dungeon_mode and bool(getattr(cfg_now, "skip_dungeon_story", False)) and known_dungeon:
+                        # Scene-edge event only — queue off the guard tick thread.
+                        schedule_skip_dungeon_story_async(
+                            guard_session,
+                            hwnd=int(getattr(guard_session, "hwnd", 0) or 0),
+                            delay_s=float(HANG_PLOT_SKIP_DELAY_S),
                             log=log,
                         )
-                    else:
-                        stop_wuzun_open_monster(pid, log=log)
-                if _wanzi_direct_enabled(cfg_now):
-                    # Scene already stable here; resume the direct sender.
-                    # Do not write recovery slots or sleep on this thread.
-                    start_wanzi_packet_hang(guard_session, cfg_now, log=log)
+                    elif bool(getattr(cfg_now, "skip_dungeon_story", False)):
+                        log(
+                            "hang guard: plot skip not rearmed "
+                            f"scene={scene_id or '-'} reason={reason}"
+                        )
+                        _disable_dungeon_story_hook(guard_session, log=log)
+                    # 武尊自动开怪：仅在武尊场景（1255/1541）启动，离开时停止
+                    if dungeon_mode and bool(getattr(cfg_now, "auto_open_monster", False)):
+                        from app.core.wuzun_open_monster import (
+                            WUZUN_SCENE_IDS,
+                            start_wuzun_open_monster,
+                            stop_wuzun_open_monster,
+                        )
+
+                        is_wuzun = int(scene_id or 0) in WUZUN_SCENE_IDS
+                        if is_wuzun:
+                            start_wuzun_open_monster(
+                                pid,
+                                int(getattr(guard_session, "hwnd", 0) or 0),
+                                int(getattr(cfg_now, "open_monster_rows", 0) or 0),
+                                log=log,
+                            )
+                        else:
+                            stop_wuzun_open_monster(pid, log=log)
+                    if _wanzi_direct_enabled(cfg_now):
+                        # Scene already stable here; resume the direct sender.
+                        # Do not write recovery slots or sleep on this thread.
+                        start_wanzi_packet_hang(guard_session, cfg_now, log=log)
             except Exception as e:
                 log(f"hang guard: scene rearm err {e}")
             finally:
                 with _HANG_GUARD_CFG_LOCK:
-                    _HANG_GUARD_SCENE_REARM.discard(pid)
+                    # rearm 未就绪则保留标记，下个 tick 继续重试（见上方注释）。
+                    if not rearm_pending:
+                        _HANG_GUARD_SCENE_REARM.discard(pid)
                 try:
                     from app.core.dungeon_fight_kick import reset_state
 

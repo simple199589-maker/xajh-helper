@@ -56,6 +56,8 @@
 
 ## 六、红线（客户端崩溃教训）
 
+> DLL 构建与部署规范已独立成文：`docs/NATIVE_DLL_MAINTENANCE.md`（命名铁律 / ID 单源 / 部署顺序 / 红线全录）。
+
 1. 游戏逻辑函数（promote 0x73E300 等）**严禁远程线程调用**——UI 线程桥接命令或封包（CD1740）才安全；
 2. 软件断点**严禁在目标运行时设置**——只能暂停态操作（x32dbg/LyScript 流程见
    `.issues/_x32_alert_deep.py` 模板）；

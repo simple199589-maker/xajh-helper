@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Verify a native bin directory contains the full native artifact inventory.
 
-Catches missing / empty / wrong-architecture binaries and the generic-vs-stamped
-bridge hash mismatch BEFORE PyInstaller, so packaging never fails with an
-anonymous "Unable to find ..." data-file error.
+Catches missing / empty / wrong-architecture binaries BEFORE PyInstaller, so
+packaging never fails with an anonymous "Unable to find ..." data-file error.
 
 Usage:
   python tools\\check_native_bin.py                 # ROOT/native/bin
@@ -82,10 +81,6 @@ def main(argv: list[str]) -> int:
         if machine != MACHINE_I386:
             bad_arch.append(f"{name} (machine={machine})")
 
-    hash_mismatch = False
-    generic = target / "xajh_bridge.dll"
-
-
     if missing or empty or bad_arch:
         if missing:
             print(f"missing ({len(missing)}): " + ", ".join(missing), file=sys.stderr)
@@ -96,8 +91,6 @@ def main(argv: list[str]) -> int:
                 "wrong architecture (expected x86 0x14C): " + ", ".join(bad_arch),
                 file=sys.stderr,
             )
-        if hash_mismatch:
-            print("generic and stamped bridge hash mismatch", file=sys.stderr)
         return 2
 
     print(f"native bin OK: {len(names)} files present in {target}")

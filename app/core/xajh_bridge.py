@@ -172,6 +172,9 @@ CMD_AUTOPLAY_START_BYPASS = int(BridgeCommand.AUTOPLAY_START_BYPASS)
 CMD_SKILL_INTERRUPT_67 = int(BridgeCommand.SKILL_INTERRUPT_67)
 # Seed the dungeon autoplay state machine with a non-self party member target.
 CMD_AUTOPLAY_SEED_FOLLOW = int(BridgeCommand.AUTOPLAY_SEED_FOLLOW)
+# UI-thread attack-component drive for dungeon Alert-stick self-heal; the
+# component address resolves per-build from the note table on the native side.
+CMD_AUTOPLAY_DRIVE_ATTACK = int(BridgeCommand.AUTOPLAY_DRIVE_ATTACK)
 CMD_QUICK_TEAM_FOLLOW = int(BridgeCommand.QUICK_TEAM_FOLLOW)
 CMD_OBJECT_SCAN = int(BridgeCommand.OBJECT_SCAN)
 # Exact no-key 有凤 tail transaction: internal E07 action then local cleanup.
@@ -255,10 +258,9 @@ def default_bridge_paths() -> tuple[Path, Path]:
     """
     Locate the canonical bridge DLL and injector.
 
-    Prefer only the stamped DLL whose name exactly matches BRIDGE_BUILD_ID.
-    Other historical builds remain ignored, while a currently loaded generic
-    DLL may stay locked by an older client.
-    When packaged, prefer a short path under app_root/native/bin so the
+    Only the unified xajh_bridge.dll is used — no build-id-stamped names; the
+    protocol build id lives in the DLL header, not the filename. When
+    packaged, prefer a short path under app_root/native/bin so the
     game process can LoadLibrary without long/special _internal paths.
     @author by ak
     """
@@ -307,8 +309,8 @@ def _inject_stage_dir() -> Path:
 
     Keep staging under the current software target so the full installation is
     self-contained and removable. A dedicated runtime directory keeps the
-    formal bundled binaries separate while build-specific names avoid clashes
-    with an older game process that still has a DLL mapped.
+    formal bundled binaries separate; the DLL itself always keeps the unified
+    xajh_bridge.dll name.
     @author by ak
     """
     try:
@@ -337,9 +339,18 @@ def stage_bridge_for_inject(log: LogFn | None = None) -> tuple[Path, Path]:
         log(f"stage mkdir failed: {e}")
         return dll, inj
 
-    # A loaded DLL keeps its exact path mapped until the target process exits.
-    # Use a build-specific filename so a newly launched game can always load
-    # the current bridge even while an older game still owns the legacy stage.
+    # 统一具名规则：stage 只允许 xajh_bridge.dll。历史按 build 号命名的
+    # 桥文件一并清除；被仍在运行的旧游戏映射锁住的文件跳过，游戏退出后再清。
+    for leftover in stage.glob("xajh_bridge_*.dll"):
+        try:
+            leftover.unlink()
+        except OSError as e:
+            log(f"stage cleanup skip {leftover.name}: {e}")
+
+    # A loaded DLL keeps its exact path mapped until the target process exits,
+    # so a rebuilt bridge takes effect only after the game restarts. The file
+    # name itself is always the unified xajh_bridge.dll; BRIDGE_BUILD_ID lives
+    # in the protocol header, not the filename.
     staged_dll = stage / "xajh_bridge.dll"
     staged_inj = stage / "xajh_inject.exe"
 

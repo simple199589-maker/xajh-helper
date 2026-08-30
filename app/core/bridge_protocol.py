@@ -227,7 +227,10 @@ COMMAND_CAPABILITY = {
     BridgeCommand.DUNGEON_TARGET_RULES: BridgeCapability.TARGET,
     BridgeCommand.JIANGLONG_RUNTIME_RESOLVE: BridgeCapability.SESSION,
     BridgeCommand.QUICK_TEAM_FOLLOW: BridgeCapability.UI_INPUT,
-    BridgeCommand.AUTOPLAY_DRIVE_ATTACK: "autoplay.drive",
+    # No COMMAND_BUILD_CAPABILITY entry on purpose: the drive VA resolves
+    # per-build from the note table and the native handler fails closed on a
+    # null component, while no checked-in profile lists "autoplay.drive" — a
+    # build gate here would hard-refuse every client build.
     BridgeCommand.AUTOPLAY_DRIVE_ATTACK: BridgeCapability.AUTOPLAY,
     BridgeCommand.OBJECT_SCAN: BridgeCapability.TARGET,
 }

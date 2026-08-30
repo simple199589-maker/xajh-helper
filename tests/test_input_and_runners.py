@@ -605,6 +605,42 @@ class InputAndRunnerTests(unittest.TestCase):
         task_guard.assert_called_once_with(session)
         stop_guard.assert_not_called()
 
+    def test_hang_off_unknown_retries_then_stops_via_pipeline(self) -> None:
+        """挂机态未知：重试后仍未知也走统一管线直接关（不再「未知跳过」）。"""
+        from app.core.activity_auto import ActivityConfig
+
+        runner = ActivityRunner(
+            pid=10,
+            cfg=ActivityConfig(
+                mode="qiegao", hang_probe_retries=2, hang_probe_retry_s=0.01
+            ),
+        )
+        session = MagicMock(pid=10)
+        with patch.object(
+            runner, "_read_hang_on", side_effect=[None, None, None, None]
+        ), patch.object(
+            runner, "_resolve_hang_cfg", return_value=MagicMock()
+        ), patch.object(
+            runner, "_ensure_qiegao_task_guard", return_value=True
+        ) as task_guard, patch(
+            "app.core.activity_auto._sleep_interruptible", return_value=True
+        ) as sleep, patch(
+            "app.core.hang_settings.stop_hang",
+            return_value={"ok": True, "via": "raw_c2s_packet", "message": ""},
+        ) as stop_hang:
+            self.assertTrue(
+                runner._ensure_hang_off(
+                    session,
+                    reason="寻路前关挂机",
+                    keep_task_guard=True,
+                )
+            )
+
+        # 2 次未知重试 + stop 后 1 次 _hang_settle 沉降
+        self.assertEqual(sleep.call_count, 3)
+        stop_hang.assert_called_once()
+        task_guard.assert_called_once_with(session)
+
     def test_qiegao_dead_takes_no_action_until_revived(self) -> None:
         """死亡纪律：死亡期间零动作（不发封包/不重启内挂），复活后才恢复。"""
         from app.core.activity_auto import ActivityConfig

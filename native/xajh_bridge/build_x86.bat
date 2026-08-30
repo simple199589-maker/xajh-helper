@@ -16,7 +16,6 @@ set BUILD=%ROOT%\build\native\xajh_bridge
 if not exist "%OUT%" mkdir "%OUT%"
 if not exist "%BUILD%" mkdir "%BUILD%"
 
-)
 cl /nologo /utf-8 /O2 /MT /LD /EHsc /W3 /Brepro /DWIN32 /D_WINDOWS /Fo:"%BUILD%\\" "%~dp0dllmain.cpp" /Fe:"%BUILD%\xajh_bridge.dll" /link /Brepro /DLL user32.lib kernel32.lib psapi.lib advapi32.lib
 if errorlevel 1 exit /b 1
 cl /nologo /utf-8 /O2 /MT /EHsc /W3 /Brepro /DWIN32 /Fo:"%BUILD%\\" "%~dp0injector.cpp" /Fe:"%BUILD%\xajh_inject.exe" /link /Brepro kernel32.lib
