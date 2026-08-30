@@ -11617,15 +11617,27 @@ class TaskPage(FeaturePage):
             if action == ACTION_TEAM_LEAVE:
                 self._run_team_leave(from_sync=True, keep_leader_id=0)
             elif action == ACTION_CLAIM_ACTIVITY:
-                page = self._sibling_page("activity")
-                if page is not None and hasattr(page, "handle_claim_activity_sync"):
-                    page.handle_claim_activity_sync(
-                        source_pid=int(self._fixed_pid or 0),
-                        points=None,
-                        reason="队内控",
+                runner = getattr(self, "_runner", None)
+                if (
+                    runner is not None
+                    and runner.is_running()
+                    and getattr(runner, "_activity", None) is not None
+                ):
+                    # 本窗排程活跃/副本 runner 运行中：暂不领箱，避免双线程抢同一游戏窗口。
+                    self._push(
+                        "log",
+                        "自动任务 [队内控] 本窗排程任务运行中，跳过主控领箱同步",
                     )
                 else:
-                    self._push("log", "自动任务 [队内控] 领活跃失败：无 ActivityPage")
+                    page = self._sibling_page("activity")
+                    if page is not None and hasattr(page, "handle_claim_activity_sync"):
+                        page.handle_claim_activity_sync(
+                            source_pid=int(self._fixed_pid or 0),
+                            points=None,
+                            reason="队内控",
+                        )
+                    else:
+                        self._push("log", "自动任务 [队内控] 领活跃失败：无 ActivityPage")
             elif action == ACTION_MAP_FLY:
                 text = str(msg.get("text") or "").strip()
                 extra = str(msg.get("extra") or "").strip()
