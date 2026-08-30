@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """副本模式"忽略怪放行"看门狗（卡怪专用，平时不干扰）。
 
-职责边界：只服务「忽略副本卡怪」功能——把游戏原生自动选怪拒绝的卡怪
-（开局卡怪：北疆疯丐/上官霸刀等；以及角色忽略名单里的本，如沙漠古镇/
-梅庄外围最终 boss）提交为当前目标，解决"到了怪面前不打怪"。平时
+与「组队副本挂机的跟随打怪机器卡监测」(follow_fight_watchdog) 是两个
+独立功能：本模块只服务「忽略副本卡怪」——把游戏原生自动选怪拒绝的
+卡怪（开局卡怪：北疆疯丐/上官霸刀等；以及角色忽略名单里的本，如沙漠
+古镇/梅庄外围最终 boss）提交为当前目标，解决"到了怪面前不打怪"。平时
 （忽略怪不在场）看门狗待机，绝不抢目标、不干扰正常挂机与跟随。
 
 启动前置条件（两者同时满足才出手）：
@@ -73,10 +74,8 @@ MAX_AOI_NODES = 512
 KICK_FAIL_BAN_AFTER = 2
 KICK_FAIL_BAN_S = 120.0
 
-# Alert 粘滞重初始化
-_NOTE_STATE_ALERT = 0x12BEE04  # StateAlert@instance_follow_fight
-ALERT_REINIT_AFTER_S = 10.0
-REINIT_COOLDOWN_S = 60.0
+# 跟随打怪状态机的 StateAlert note（机器卡监测用）已随功能一迁往
+# follow_fight_watchdog；本模块只剩忽略怪（卡怪）放行一个职责。
 
 _state_lock = threading.Lock()
 _state: dict[int, dict] = {}
@@ -106,21 +105,6 @@ def _armed_ignore_tids(pid: int) -> tuple[int, ...]:
         return get_dungeon_guard_ignore_tids(pid)
     except Exception:
         return ()
-
-
-def _host_is_leader(session) -> bool:
-    """本机角色是否队长（读取失败按队长处理，不丢队长处置提示）。"""
-    try:
-        from app.core.team_ops import list_party_members
-
-        for member in list_party_members(
-            session, fresh=True, log=lambda _m: None
-        ) or []:
-            if bool(member.get("is_self")):
-                return bool(member.get("is_leader"))
-    except Exception:
-        pass
-    return True
 
 
 def _log_msg(msg: str) -> None:
@@ -282,8 +266,8 @@ def maybe_kick(session, *, log=None, still_s: float = STILL_S) -> None:
     """挂机守护 tick 入口：忽略怪放行（卡怪专用，平时待机不干扰）。
 
     前置条件见模块 docstring：忽略怪已武装 ∧ AOI 内有名单忽略怪才出手。
-    StateAlert 粘滞告警在门之前，无条件保留。低频廉价；任何异常都不影响
-    守护主流程。
+    跟随打怪的机器卡诊断（StateAlert）是另一个功能，见
+    follow_fight_watchdog。低频廉价；任何异常都不影响守护主流程。
     @author by ak
     """
     pid = int(getattr(session, "pid", 0) or 0)
@@ -305,12 +289,6 @@ def maybe_kick(session, *, log=None, still_s: float = STILL_S) -> None:
     ap = int(mem.get("autoplay") or 0)
     if not ap:
         return
-    mg = ap + 0x578
-
-    # StateAlert 原始状态（廉价 RPM 读）。
-    st_ptr = _rpm_u32(session, mg + 0x2C)
-    st_vt = _rpm_u32(session, st_ptr) if st_ptr else 0
-    alert_vt = note_to_live(module_base, _NOTE_STATE_ALERT)
 
     try:
         mid = int(resolve_host_base_rpm(session) or 0)
@@ -325,7 +303,6 @@ def maybe_kick(session, *, log=None, still_s: float = STILL_S) -> None:
     sel = read_selected_target(session, host)
     pos = _host_pos(session, host)
 
-    alert_fire = False
     with _state_lock:
         st = _state.setdefault(pid, {})
         now = time.monotonic()
@@ -352,21 +329,6 @@ def maybe_kick(session, *, log=None, still_s: float = STILL_S) -> None:
             st["still_since"] = now
             return
         still_dur = now - float(still_since)
-
-        # ---- StateAlert 机器卡告警（诊断，不受忽略怪前置门影响）----
-        # 判定收紧：StateAlert ∧ 无选中目标 ∧ 站街≥10s。StateAlert 亦可能
-        # 是战斗中的正常驻留态，旧逻辑仅按状态位判断，导致非队长窗口也
-        # 频繁弹"移交队长"误报（2026-08-30 实测）。按身份给处置提示：
-        #   队长窗 = 已知粘滞，仅手动移交队长可解；
-        #   队员窗 = 关闭重开本窗挂机即可，掉队由主控卡队检测拉回。
-        alert_fire = (
-            st_vt == alert_vt
-            and still_dur >= ALERT_REINIT_AFTER_S
-            and now >= float(st.get("reinit_cooldown_until") or 0)
-        )
-        if alert_fire:
-            st["reinit_cooldown_until"] = now + REINIT_COOLDOWN_S
-
         if still_dur < float(still_s):
             return
         if now < float(st.get("cooldown_until") or 0):
@@ -374,23 +336,10 @@ def maybe_kick(session, *, log=None, still_s: float = STILL_S) -> None:
         # 占位冷却，避免 AOI 遍历每 tick 都跑；提交成功后由 sel 分支续期。
         st["cooldown_until"] = now + EMPTY_COOLDOWN_S
 
-    if alert_fire:
-        if _host_is_leader(session):
-            _emit(
-                log,
-                "副本看门狗：机器卡 StateAlert（队长身份开挂的已知粘滞）——"
-                "请手动：移交队长给队员 → 关闭并重开本窗副本挂机 → 拿回队长",
-            )
-        else:
-            _emit(
-                log,
-                "副本看门狗：本窗内挂疑似机器卡（StateAlert·无目标·静止≥10s）"
-                "——可关闭并重开本窗挂机；跟随掉队由主控卡队检测自动拉回",
-            )
-
     # ---- 启动前置条件：忽略怪功能未开启/未武装 → 放行待机，不干扰 ----
-    # 注意：必须放在 StateAlert 告警之后——机器卡告警不受此门影响。
     # 名单来自「忽略副本卡怪」武装时同步的 packaged + 角色忽略 TID。
+    # 注：跟随打怪的机器卡诊断（StateAlert）是另一个功能，见
+    # follow_fight_watchdog，由守护 tick 独立调用，不经过本门。
     want_tids = _armed_ignore_tids(pid)
     if not want_tids:
         _gate_idle_log(pid, log, "副本放行：忽略怪功能未开启，看门狗待机")

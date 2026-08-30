@@ -4,7 +4,9 @@
 
 #define BRIDGE_MAGIC 0x47524258u
 #define BRIDGE_PROTOCOL_VERSION 2u
-#define BRIDGE_BUILD_ID 2026082603u
+#ifndef BRIDGE_BUILD_ID
+#define BRIDGE_BUILD_ID 2026083001u
+#endif
 
 enum BridgeCmdId {
   CMD_IDLE = 0,
@@ -126,6 +128,8 @@ enum BridgeCmdId {
   CMD_QUICK_TEAM_FOLLOW = 55,
   // Read-only live NPC/Matter lookup for the 武尊堂 challenge card.
   CMD_OBJECT_SCAN = 56,
+  // UI 线程驱动攻击组件 tick（副本 Alert 粘滞自愈）。
+  CMD_AUTOPLAY_DRIVE_ATTACK = 57,
 };
 
 enum BridgeStatus { ST_IDLE = 0, ST_PENDING = 1, ST_OK = 2, ST_ERR = 3 };

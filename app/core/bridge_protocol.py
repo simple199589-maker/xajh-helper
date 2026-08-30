@@ -9,7 +9,7 @@ BRIDGE_MAGIC = 0x47524258
 PROTOCOL_VERSION = 2
 # Increment when native behavior changes without changing the shared layout.
 # A healthy older DLL may otherwise be silently reused until the game exits.
-BRIDGE_BUILD_ID = 2026082603
+BRIDGE_BUILD_ID = 2026083001
 LEGACY_SHARED_SIZE = 184
 SHARED_SIZE = 200
 
@@ -92,6 +92,8 @@ class BridgeCommand(IntEnum):
     DUNGEON_TARGET_RULES = 53
     JIANGLONG_RUNTIME_RESOLVE = 54
     QUICK_TEAM_FOLLOW = 55
+    # UI 线程驱动攻击组件 tick（副本 Alert 粘滞自愈，2026-08-30）。
+    AUTOPLAY_DRIVE_ATTACK = 57
     # Read-only live NPC/Matter lookup for 武尊堂 challenge card.
     OBJECT_SCAN = 56
 
@@ -225,6 +227,8 @@ COMMAND_CAPABILITY = {
     BridgeCommand.DUNGEON_TARGET_RULES: BridgeCapability.TARGET,
     BridgeCommand.JIANGLONG_RUNTIME_RESOLVE: BridgeCapability.SESSION,
     BridgeCommand.QUICK_TEAM_FOLLOW: BridgeCapability.UI_INPUT,
+    BridgeCommand.AUTOPLAY_DRIVE_ATTACK: "autoplay.drive",
+    BridgeCommand.AUTOPLAY_DRIVE_ATTACK: BridgeCapability.AUTOPLAY,
     BridgeCommand.OBJECT_SCAN: BridgeCapability.TARGET,
 }
 

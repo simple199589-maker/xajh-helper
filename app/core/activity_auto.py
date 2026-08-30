@@ -1065,6 +1065,11 @@ def default_instance_label() -> str:
     return instance_label(DEFAULT_INSTANCE_ID)
 
 
+# 副本轮次冷却出厂默认（秒）：副本回城后进下一次本的 CD、计划任务完成一项后的 CD、
+# UI「轮次冷却」输入框的兜底值统一引用本常量；调整冷却只改这里。
+DEFAULT_ENTRY_CD_S = 60.0
+
+
 @dataclass
 class ActivityConfig:
     """自动副本 / 自动活跃 parameters. @author by ak"""
@@ -1086,8 +1091,8 @@ class ActivityConfig:
     return_poll_s: float = 15.0
     # After return: configurable CD before next enter.  UI sets min=max for a
     # deterministic user-entered value; separate bounds remain API-compatible.
-    entry_cd_min_s: float = 30.0
-    entry_cd_max_s: float = 30.0
+    entry_cd_min_s: float = DEFAULT_ENTRY_CD_S
+    entry_cd_max_s: float = DEFAULT_ENTRY_CD_S
     loop_idle_s: float = 1.5
     use_bridge: bool = True
     # Points: prefer live GetReputation(46); points_per_run only for display fallback.

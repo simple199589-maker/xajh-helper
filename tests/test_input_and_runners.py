@@ -83,13 +83,13 @@ class InputAndRunnerTests(unittest.TestCase):
         self.assertFalse(any(call.kwargs.get("clear_all") for call in calls))
         self.assertTrue(all(call.kwargs.get("allow_softsend", False) is False for call in calls))
 
-    def test_activity_default_post_run_cooldown_is_thirty_seconds(self) -> None:
-        from app.core.activity_auto import ActivityConfig
+    def test_activity_default_post_run_cooldown_uses_shared_constant(self) -> None:
+        from app.core.activity_auto import DEFAULT_ENTRY_CD_S, ActivityConfig
 
         cfg = ActivityConfig()
-        self.assertEqual(cfg.entry_cd_min_s, 30.0)
-        self.assertEqual(cfg.entry_cd_max_s, 30.0)
-        self.assertEqual(cfg.entry_cd_sleep_s(), 30.0)
+        self.assertEqual(cfg.entry_cd_min_s, DEFAULT_ENTRY_CD_S)
+        self.assertEqual(cfg.entry_cd_max_s, DEFAULT_ENTRY_CD_S)
+        self.assertEqual(cfg.entry_cd_sleep_s(), DEFAULT_ENTRY_CD_S)
 
     def test_activity_quiet_event_updates_ui_without_debug_log(self) -> None:
         events = []

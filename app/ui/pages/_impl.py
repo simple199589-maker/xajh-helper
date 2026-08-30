@@ -44,6 +44,7 @@ from app.core.activity_auto import (
     ActivityConfig,
     ActivityRunner,
     ActivityStepEvent,
+    DEFAULT_ENTRY_CD_S,
     DEFAULT_INSTANCE_ID,
     FLOURISH_AWARD_REPU,
     QIEGAO_CATEGORY_ALIAS,
@@ -7310,12 +7311,12 @@ class ActivityPage(FeaturePage):
             side=tk.LEFT, padx=(10, 0)
         )
         try:
-            entry_cd_raw = self.settings.get("activity_entry_cd_s", 30.0)
+            entry_cd_raw = self.settings.get("activity_entry_cd_s", DEFAULT_ENTRY_CD_S)
             if entry_cd_raw is None:
-                entry_cd_raw = 30.0
+                entry_cd_raw = DEFAULT_ENTRY_CD_S
             entry_cd_saved = max(0.0, float(entry_cd_raw))
         except Exception:
-            entry_cd_saved = 30.0
+            entry_cd_saved = DEFAULT_ENTRY_CD_S
         self.var_entry_cd = tk.StringVar(value=f"{entry_cd_saved:g}")
         self.ent_entry_cd = ttk.Entry(
             self.row1, textvariable=self.var_entry_cd, width=5
@@ -7808,9 +7809,9 @@ class ActivityPage(FeaturePage):
         """Parse the shared activity/dungeon post-run cooldown. @author by ak"""
         try:
             raw = (self.var_entry_cd.get() or "").strip()
-            value = float(raw) if raw else 30.0
+            value = float(raw) if raw else DEFAULT_ENTRY_CD_S
         except Exception:
-            value = 30.0
+            value = DEFAULT_ENTRY_CD_S
         return max(0.0, min(3600.0, float(value)))
 
     def _persist_entry_cd_ui(self) -> float:
@@ -8870,6 +8871,38 @@ class ActivityPage(FeaturePage):
             pass
         return False
 
+    def _notify_slaves_follow_for_recall(self) -> bool:
+        """卡队召回：队内控优先，其次经自动任务页同步总线（群控）。
+
+        与自动任务路径（ScheduleTaskRunner._sync_routine_slave_follow）同通道；
+        同步总线发布在 TaskPage._publish_task_sync（主控校验/云控桥），本页
+        没有该方法，须跨页调用（同降龙编排做法），不能写 self._publish_task_sync。
+
+        @author by ak
+        """
+        # 队内控：组队聊天通道下发「跟随主控」指令。
+        try:
+            if team_control_flag_enabled(self.settings):
+                from app.core.team_chat import build_master_command, send_team_message
+
+                result = send_team_message(
+                    int(self._fixed_pid or 0),
+                    build_master_command(ACTION_DAILY_FOLLOW, [0]),
+                    log=lambda m: self._push("log", m),
+                )
+                if bool(result.get("ok")):
+                    return True
+        except Exception as e:
+            self.log(f"自动副本: 卡队召回队内控异常: {e}")
+        # 群控：经自动任务页发布同步总线。
+        try:
+            tp = self._sibling_page("task")
+            if tp is not None and hasattr(tp, "_publish_task_sync"):
+                return bool(tp._publish_task_sync(ACTION_DAILY_FOLLOW, 0, name=""))
+        except Exception as e:
+            self.log(f"自动副本: 卡队召回群控异常: {e}")
+        return False
+
     def _on_start(self) -> None:
         sess = self._require_session()
         if not sess:
@@ -8950,10 +8983,8 @@ class ActivityPage(FeaturePage):
             hang_settings=dict(self.settings),
             on_event=on_event,
             log=lambda m: self._push("log", m),
-            # 卡队召回：副本内队友过远时经同步总线/队内控通知队员跟随主控。
-            slave_follow_notify=lambda: bool(
-                self._publish_task_sync(ACTION_DAILY_FOLLOW, 0, name="")
-            ),
+            # 卡队召回：副本内队友过远时经队内控/同步总线通知队员跟随主控。
+            slave_follow_notify=self._notify_slaves_follow_for_recall,
         )
         self._runner.start()
         self._register_host_runner(self._runner)
@@ -15586,7 +15617,7 @@ class TaskPage(FeaturePage):
             qiegao_afk=afk,
             activity_busy_check=self._activity_page_busy,
             custom_ids=custom_ids if isinstance(custom_ids, dict) else None,
-            activity_entry_cd_s=float(self.settings.get("activity_entry_cd_s") or 30.0),
+            activity_entry_cd_s=float(self.settings.get("activity_entry_cd_s") or DEFAULT_ENTRY_CD_S),
             activity_return_poll_s=15.0,
             hang_settings=dict(self.settings),
             team_control_enabled=team_control_flag_enabled(self.settings),
@@ -15844,7 +15875,7 @@ class TaskPage(FeaturePage):
         except (TypeError, ValueError):
             afk = (None, None, None)
         cids = self.settings.get("schedule_custom_ids")
-        entry_cd = float(self.settings.get("activity_entry_cd_s") or 30.0)
+        entry_cd = float(self.settings.get("activity_entry_cd_s") or DEFAULT_ENTRY_CD_S)
 
         self._runner = ScheduleTaskRunner(
             pid=int(mounted.pid),

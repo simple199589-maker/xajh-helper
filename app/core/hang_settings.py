@@ -5871,6 +5871,29 @@ def stop_hang(
             reset_state(int(getattr(session, "pid", 0) or 0))
         except Exception:
             pass
+        # Alert 粘滞机器对停止封包无响应（2026-08-30 重现：关闭封包已发送
+        # 但机器仍 Attack/Alert）。复刻手动恢复法：重发开启封包同步会话
+        # 后再关，最多两轮。
+        try:
+            from app.core.activity_auto import resolve_cec_autoplay_rpm
+
+            for round_i in range(2):
+                time.sleep(0.6)
+                if resolve_cec_autoplay_rpm(session).get("running") is not True:
+                    break
+                log(
+                    f"hang stop: 关闭后仍在运行（第{round_i + 1}轮），"
+                    "重发开启→关闭恢复序列"
+                )
+                _send_hang_control_packet(
+                    session, HANG_START_PACKET, action="开启(恢复)", log=log
+                )
+                time.sleep(0.6)
+                _send_hang_control_packet(
+                    session, HANG_STOP_PACKET, action="关闭(恢复)", log=log
+                )
+        except Exception as e:
+            log(f"hang stop: 恢复序列 err {e}")
         try:
             from app.core.wuzun_open_monster import stop_wuzun_open_monster
 
@@ -6559,20 +6582,24 @@ def _start_hang_unlocked(
         # 开挂"场景下跟随快照指向自己，机器会停在 StateAlert 不打怪；
         # 本地直调把机器直接置入 StateAttack（可战斗态），目标由守护里的
         # 放行看门狗补齐。锚点 NaN 由开挂确认后的 anchor repair 兜底。
+        # 注：场景门（我们自己的 CRT 围栏）在进本/过图后可能延迟放行，
+        # 故先等门（wait_pid_scene_stable）再调——2026-08-30 2.1.1 重现。
+        # 曾试验改走桥接 Btn_Start 处理器（UI 线程）：实测只置 running 旗标、
+        # 状态机停在 Idle，无法替代本地初始化，已回退。
         if dungeon_mode:
+            try:
+                from app.core.remote_runtime import wait_pid_scene_stable
+
+                wait_pid_scene_stable(
+                    int(getattr(session, "pid", 0) or 0), timeout_s=5.0
+                )
+            except Exception as e:
+                log(f"hang start: scene gate wait 超时，仍尝试本地初始化: {str(e)[:60]}")
             from app.core.activity_auto import start_autoplay_force
 
             force_ret = start_autoplay_force(
                 session, send_packet=False, log=log
             )
-            out["force_start"] = force_ret
-            if not bool(force_ret.get("ok")):
-                out["ok"] = False
-                out["message"] = "副本模式本地 StartAutoPlay 失败: " + str(
-                    force_ret.get("error") or force_ret.get("note") or "unknown"
-                )
-                log(f"hang start: {out['message']}")
-                return out
         # 开挂封包窗口冻结 hang-owned 丸子发包：raw_c2s 外来线程与游戏
         # 封包响应初始化并发，见 _resolve_host_data 注释（2026-08-30 崩溃）。
         _wanzi_pause_for_transition(_hang_pid(session))
@@ -7036,10 +7063,11 @@ _HANG_GUARD_SESSION_OWNED: set[int] = set()
 _HANG_GUARD_CFG_LOCK = threading.Lock()
 _PLOT_SKIP_ASYNC_LOCK = threading.Lock()
 _PLOT_SKIP_ASYNC_GEN: dict[int, int] = {}
-_REARM_REINIT_GEN_LOCK = threading.Lock()
-_REARM_REINIT_GEN: dict[int, int] = {}
 _HANG_GUARD_LAST_SCENE: dict[int, int] = {}
 _HANG_GUARD_SCENE_REARM: set[int] = set()
+_HANG_GUARD_REARM_RETRY: dict[int, int] = {}
+# 过图后本地重初始化的重试上限（守护 tick 1s 节奏下 ≈ 5s）
+_SCENE_REARM_RETRY_MAX = 5
 _KNOWN_DUNGEON_SCENE_IDS: frozenset[int] | None = None
 
 
@@ -7112,88 +7140,6 @@ def _disable_dungeon_story_hook(
             log("hang plot skip: disabled outside known dungeon")
     except Exception as exc:
         log(f"hang plot skip: disable outside dungeon err {exc}")
-
-
-def schedule_dungeon_rearm_reinit(
-    session: GameAttachSession | int | None,
-    *,
-    hwnd: int = 0,
-    log: LogFn | None = None,
-) -> dict:
-    """Queue the post-map-load StartAutoPlay re-init off the guard tick thread.
-
-    过图重入洞：加载期场景门会拦掉开挂时的本地 StartAutoPlay，新图机器可能
-    落 StateAlert。本任务在独立线程等待公用过图稳定门 wait_scene_ready 后，
-    本地重初始化（force）把机器置回 StateAttack，并校验 running——若被弄停
-    立即重发开启封包恢复。
-
-    @author by ak
-    """
-    log = log or (lambda _m: None)
-    pid = _hang_pid(session)
-    if not pid:
-        return {"ok": False, "error": "no_pid", "scheduled": False}
-    hwnd_i = int(hwnd or getattr(session, "hwnd", 0) or 0) if session is not None else int(hwnd or 0)
-    with _REARM_REINIT_GEN_LOCK:
-        gen = int(_REARM_REINIT_GEN.get(int(pid), 0) or 0) + 1
-        _REARM_REINIT_GEN[int(pid)] = gen
-
-    def _worker() -> None:
-        try:
-            time.sleep(1.0)  # 过图基础沉淀，交给 wait_scene_ready 精等
-        except Exception:
-            pass
-        with _REARM_REINIT_GEN_LOCK:
-            if int(_REARM_REINIT_GEN.get(int(pid), 0) or 0) != int(gen):
-                return
-        guard_session = None
-        owned = False
-        with _HANG_GUARD_CFG_LOCK:
-            guard_session = _HANG_GUARD_SESSION.get(int(pid))
-        sess = guard_session
-        try:
-            if sess is None or int(getattr(sess, "pid", 0) or 0) != int(pid):
-                sess = GameAttachSession(log=lambda _m: None)
-                sess.attach(int(pid))
-                sess.hwnd = int(hwnd_i or 0)
-                owned = True
-            from app.core.remote_runtime import wait_scene_ready
-
-            ready = wait_scene_ready(sess, timeout_s=30.0, log=log)
-            if not ready.get("ok"):
-                log(
-                    "hang guard: rearm re-init wait_scene_ready 未就绪，跳过 "
-                    f"({str(ready.get('error') or '')[:60]})"
-                )
-                return
-            from app.core.activity_auto import (
-                resolve_cec_autoplay_rpm,
-                start_autoplay_force,
-            )
-
-            r = start_autoplay_force(sess, send_packet=False, force=True, log=log)
-            log(
-                "hang guard: scene rearm autoplay re-init "
-                f"ok={r.get('ok')} ret=0x{(r.get('ret') or 0) & 0xFFFFFFFF:X}"
-            )
-            if resolve_cec_autoplay_rpm(sess).get("running") is not True:
-                log("hang guard: rearm 重初始化停了挂机，重发开启封包恢复")
-                _send_hang_control_packet(
-                    sess, HANG_START_PACKET, action="开启(恢复)", log=log
-                )
-        except Exception as e:
-            log(f"hang guard: rearm re-init async err pid={pid}: {e}")
-        finally:
-            if owned and sess is not None:
-                try:
-                    sess.close()
-                except Exception:
-                    pass
-
-    threading.Thread(
-        target=_worker, name=f"hang-rearm-reinit-{pid}", daemon=True
-    ).start()
-    return {"ok": True, "scheduled": True, "pid": pid}
 
 
 def schedule_skip_dungeon_story_async(
@@ -7773,6 +7719,7 @@ def start_hang_guard(
         _HANG_GUARD_LAST_SCENE.pop(pid, None)
         # 标记首次场景检查：第一个稳定 tick 触发副本跳过剧情 / 武尊开怪等
         _HANG_GUARD_SCENE_REARM.add(pid)
+        _HANG_GUARD_REARM_RETRY.pop(pid, None)
         if startup_maintain:
             _HANG_GUARD_STARTUP_MAINTAIN.add(pid)
     if old_owned and old_session is not None and old_session is not guard_session:
@@ -7816,6 +7763,7 @@ def start_hang_guard(
                 prev_sid = int(_HANG_GUARD_LAST_SCENE.get(pid) or 0)
                 if scene_id_now > 0 and prev_sid > 0 and scene_id_now != prev_sid:
                     _HANG_GUARD_SCENE_REARM.add(pid)
+                    _HANG_GUARD_REARM_RETRY.pop(pid, None)
                     scene_rearm_due = True
                     log(
                         f"hang guard: scene change {prev_sid}->{scene_id_now}, "
@@ -7846,18 +7794,62 @@ def start_hang_guard(
 
         # After map change settles: optional plot skip + wanzi re-prepare.
         if scene_rearm_due:
+            # 过图重入洞（事件驱动，无长阻塞）：每 tick 尝试一次本地
+            # StartAutoPlay 重初始化——场景门未 settle 时毫秒级失败，
+            # 下个 tick 自然重试；成功（running 保持 True）才入队出清。
+            # 连续失败超过 _SCENE_REARM_RETRY_MAX 视为放弃，交由
+            # 看门狗的 Alert 粘滞告警兜底。
             try:
                 known_dungeon, scene_id, reason = _stable_known_dungeon_scene(pid)
-                # 过图重入洞：加载期场景门会拦掉开挂时的本地 StartAutoPlay，
-                # 新图机器可能落 StateAlert。重初始化走独立线程（不阻塞 tick），
-                # 线程内用公用过图稳定门 wait_scene_ready 精等后再 force 初始化，
-                # 并校验 running——若被弄停立即重发开启封包恢复。
+                rearm_ok = True
                 if dungeon_mode:
-                    schedule_dungeon_rearm_reinit(
-                        guard_session,
-                        hwnd=int(getattr(guard_session, "hwnd", 0) or 0),
-                        log=log,
-                    )
+                    rearm_ok = False
+                    try:
+                        from app.core.activity_auto import (
+                            resolve_cec_autoplay_rpm,
+                            start_autoplay_force,
+                        )
+
+                        r = start_autoplay_force(
+                            guard_session, send_packet=False, force=True, log=log
+                        )
+                        mem2 = resolve_cec_autoplay_rpm(guard_session)
+                        rearm_ok = (
+                            bool(r.get("ok"))
+                            and mem2.get("running") is True
+                        )
+                        log(
+                            "hang guard: scene rearm autoplay re-init "
+                            f"ok={r.get('ok')} "
+                            f"ret=0x{(r.get('ret') or 0) & 0xFFFFFFFF:X} "
+                            f"running={mem2.get('running')} "
+                            f"retry={_HANG_GUARD_REARM_RETRY.get(pid, 0)}"
+                        )
+                        if mem2.get("running") is not True:
+                            # 重初始化把挂机弄停：立即重发开启封包恢复，
+                            # 本轮视为失败入队重试。
+                            _send_hang_control_packet(
+                                guard_session,
+                                HANG_START_PACKET,
+                                action="开启(恢复)",
+                                log=log,
+                            )
+                            rearm_ok = False
+                    except Exception as e:
+                        log(f"hang guard: scene rearm re-init 尚未就绪: {str(e)[:70]}")
+                        rearm_ok = False
+                    if rearm_ok:
+                        _HANG_GUARD_REARM_RETRY.pop(pid, None)
+                    else:
+                        n = _HANG_GUARD_REARM_RETRY.get(pid, 0) + 1
+                        _HANG_GUARD_REARM_RETRY[pid] = n
+                        if n >= _SCENE_REARM_RETRY_MAX:
+                            _HANG_GUARD_REARM_RETRY.pop(pid, None)
+                            rearm_ok = True  # 放弃重试，交由 Alert 告警兜底
+                            log(
+                                "hang guard: scene rearm re-init 放弃（重试上限），"
+                                "由 Alert 粘滞告警兜底"
+                            )
                 if dungeon_mode and bool(getattr(cfg_now, "skip_dungeon_story", False)) and known_dungeon:
                     # Scene-edge event only — queue off the guard tick thread.
                     schedule_skip_dungeon_story_async(
@@ -7932,11 +7924,19 @@ def start_hang_guard(
 
         n_pending = len(pending or [])
 
-        # 副本"忽略怪放行"看门狗（卡怪专用）：仅当「忽略副本卡怪」已武装
-        # 且 AOI 内存在名单忽略怪时，才提交该忽略怪（≤30m）。忽略怪不在场
-        # 时待机，绝不抢目标干扰正常挂机/跟随。纯 RPM 读 + 单次远端调用，
-        # 自带站街窗口/冷却/内挂 running 门控；异常绝不影响守护主流程。
+        # 副本挂机两个独立看门狗（守护 tick 每 1s 各跑一次，异常互不影响）：
+        # 功能一：跟随打怪（instance_follow_fight）机器卡诊断——StateAlert ∧
+        #   无目标 ∧ 静止≥10s 才提示，队长/队员分文案；独立于忽略怪开关。
+        # 功能二：「忽略怪放行」看门狗（卡怪专用）——仅当「忽略副本卡怪」
+        #   已武装且 AOI 内存在名单忽略怪时，才提交该忽略怪（≤30m）。
+        #   忽略怪不在场时待机，绝不抢目标干扰正常挂机/跟随。
         if dungeon_mode:
+            try:
+                from app.core.follow_fight_watchdog import watch_follow_fight_stuck
+
+                watch_follow_fight_stuck(guard_session, log=log)
+            except Exception as e:
+                log(f"hang guard: follow fight stuck watch err {e}")
             try:
                 from app.core.dungeon_fight_kick import maybe_kick
 

@@ -276,6 +276,7 @@ static const uint32_t kNoteAutoPlayLeaderJne = 0x00C55DA2u;
 static const uint32_t kNoteAutoPlayTargetSnapshotVtable = 0x012C23A0u;
 static const uint32_t kNoteAutoPlayRefreshTarget = 0x00C6A2D0u;
 static const uint32_t kNoteAutoPlaySetState = 0x00C60DD0u;
+static const uint32_t kNoteAutoPlayAttackDrive = 0x00C53BC0u;
 static const uint32_t kNoteAutoPlayFollowStateVtable = 0x012BEEFCu;
 static const uint32_t kNoteAutoPlayEnterFollow = 0x00C603E0u;
 static const uint32_t kHostTeamOff = 0x18CCu;
@@ -2210,6 +2211,7 @@ static bool CommandRequiresFixedRva(uint32_t cmd) {
          cmd == CMD_COMBAT_MONITOR ||
          cmd == CMD_TARGET_SUBMIT_TRACE ||
          cmd == CMD_DUNGEON_TARGET_RULES ||
+         cmd == CMD_AUTOPLAY_DRIVE_ATTACK ||
          cmd == CMD_JIANGLONG_RUNTIME_RESOLVE ||
          cmd == CMD_YOUFENG_INTERNAL_CHAIN ||
          cmd == CMD_YOUFENG_NEXT_GATE ||
@@ -2858,6 +2860,84 @@ static bool InstallTargetStateApplyHook() {
   // the trampoline before returning to 0x73043E.
   return InstallInlineDetour(&g_hk_target_state_apply, target, 14,
                              (void*)&Hook_TargetStateApply);
+}
+
+// ---- 方案1：跟随快照自引用修正（2026-08-30）----
+// 队长身份开挂时，跟随快照(CECRunToTeamLeaderPolicy)的目标会被解析回
+// 队长自己（自引用），跟随打怪机器停在 StateAlert。此 hook 在"解析跟随
+// 链一跳"(0xC6A2E0) 的结果等于自己时，替换为 seed follow 配置的队员目标。
+static const uint32_t kNoteAutoPlayFollowChain = 0x00C6A2E0u;
+static uint32_t g_follow_seed_lo = 0;
+static uint32_t g_follow_seed_hi = 0;
+static volatile LONG g_follow_seed_keep_hits = 0;
+static InlineHookRec g_hk_follow_chain = {};
+typedef void(__thiscall* FnResolveFollowChain)(void* out);
+
+// 原函数 0xC6A2E0 共 0x58 字节，头部 5 字节为 `push esi; mov esi, ecx;
+// call 0xC662E0`——E8 相对调用不可被框架搬迁（trampoline 不复位 rel32），
+// 因此 hook 整体替换函数：以下 C 复刻其全部逻辑（三个调用均换绝对地址），
+// 末尾做方案1 替换。stolen 的 5 字节被 JMP 覆盖，属死代码不再执行。
+static void __fastcall Hook_ResolveFollowChain(void* out, void* /*edx*/) {
+  typedef void*(__thiscall* FnCtor)(void*);                // 0xC662E0
+  typedef void*(__thiscall* FnStep)(void*);                // 0x5F9010
+  typedef void*(__cdecl* FnObjById)(uint32_t, uint32_t);   // 0x4AE4A0
+  typedef uint64_t(__thiscall* FnVm80)(void*);
+
+  // 链式解析：Ctor(out)→a；Step(a)→b；[b+0x18/1C]=id64；ObjById→obj；
+  // obj->vm80()→目标 id64。每跳返回值是下一跳的 this/输入（2026-08-30 修正：
+  // 原复刻把 out 误传给 Step，导致 ACCESS_VIOLATION）。
+  uint32_t lo = 0;
+  uint32_t hi = 0;
+  void* a = ((FnCtor)NoteToLive(0x00C662E0u))(out);
+  void* b = a ? ((FnStep)NoteToLive(0x005F9010u))(a) : nullptr;
+  if (b) {
+    const uint32_t id_lo = *(uint32_t*)((uint8_t*)b + 0x18);
+    const uint32_t id_hi = *(uint32_t*)((uint8_t*)b + 0x1C);
+    void* obj = ((FnObjById)NoteToLive(0x004AE4A0u))(id_lo, id_hi);
+    if (obj) {
+      void* vtbl = *(void**)obj;
+      FnVm80 vm = (FnVm80)(*(void**)((uint8_t*)vtbl + 0x80));
+      const uint64_t rid = vm(obj);
+      lo = (uint32_t)(rid & 0xFFFFFFFFu);
+      hi = (uint32_t)((rid >> 32) & 0xFFFFFFFFu);
+    }
+  }
+  // ---- 方案1：解析结果==自己 且 有 seed 队员 → 替换 ----
+  __try {
+    if ((lo | hi)) {
+      FnGetHostSide get_host =
+          (FnGetHostSide)(uintptr_t)NoteToLive(kNoteGetHostSide);
+      uint8_t* host = get_host ? (uint8_t*)get_host() : nullptr;
+      if (host) {
+        const uint32_t self_lo = *(uint32_t*)(host + kHostPlayerIdLoOff);
+        const uint32_t self_hi = *(uint32_t*)(host + kHostPlayerIdLoOff + 4u);
+        if (lo == self_lo && hi == self_hi &&
+            (g_follow_seed_lo | g_follow_seed_hi)) {
+          lo = g_follow_seed_lo;
+          hi = g_follow_seed_hi;
+          InterlockedIncrement(&g_follow_seed_keep_hits);
+        }
+      }
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+  *(uint32_t*)out = lo;
+  *(uint32_t*)((uint8_t*)out + 4) = hi;
+}
+
+static bool InstallFollowChainHook() {
+  if (g_hk_follow_chain.active) return true;
+  uint8_t* target = (uint8_t*)(uintptr_t)NoteToLive(kNoteAutoPlayFollowChain);
+  // 头 5 字节：56 8B F1 E8 <rel32>（push esi; mov esi, ecx; call 0xC662E0）
+  static const uint8_t kExpected[4] = {0x56, 0x8B, 0xF1, 0xE8};
+  __try {
+    if (!target || memcmp(target, kExpected, sizeof(kExpected)) != 0)
+      return false;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+  return InstallInlineDetour(&g_hk_follow_chain, target, 5,
+                             (void*)&Hook_ResolveFollowChain);
 }
 
 static bool ReadLatestTargetSubmitTrace(TargetSubmitTraceEntry* out) {
@@ -5440,6 +5520,35 @@ static void RunCommand() {
       return;
     }
 
+    if (cmd == CMD_AUTOPLAY_DRIVE_ATTACK) {
+      // 副本 Alert 粘滞自愈：UI 线程驱动攻击组件 tick（等价 StateAttack
+      // 态每帧的驱动调用），让攻击系统对已锁定目标出手。
+      void* autoplay = ResolveAutoplayThis();
+      if (!autoplay || !*((uint8_t*)autoplay + 0x08)) {
+        SetErr("AUTOPLAY_DRIVE_ATTACK autoplay off");
+        g_shm->status = ST_ERR;
+        return;
+      }
+      uint8_t* mgr = (uint8_t*)autoplay + 0x578u;
+      void* comp = *(void**)(mgr + 0x3Cu);
+      if (!comp) {
+        SetErr("AUTOPLAY_DRIVE_ATTACK attack component null");
+        g_shm->status = ST_ERR;
+        return;
+      }
+      uint32_t drive_va = NoteToLive(kNoteAutoPlayAttackDrive);
+      if (!drive_va) {
+        SetErr("AUTOPLAY_DRIVE_ATTACK drive va=0");
+        g_shm->status = ST_ERR;
+        return;
+      }
+      typedef void(__thiscall* FnDrive)(void*);
+      ((FnDrive)(uintptr_t)drive_va)(comp);
+      g_shm->ret = 1;
+      SetErr("AUTOPLAY_DRIVE_ATTACK ok");
+      g_shm->status = ST_OK;
+      return;
+    }
     if (cmd == CMD_AUTOPLAY_SEED_FOLLOW) {
       void* autoplay = ResolveAutoplayThis();
       if (!autoplay || !*((uint8_t*)autoplay + 0x08)) {
@@ -5509,6 +5618,15 @@ static void RunCommand() {
       }
       if (!found) {
         SetErr("AUTOPLAY_SEED_FOLLOW target not in team");
+        g_shm->status = ST_ERR;
+        return;
+      }
+      // 方案1：记录 seed 队员目标；跟随链解析到自己时由 hook 替换，
+      // 保证队长身份的跟随上下文不自引用（Alert 粘滞根修）。
+      g_follow_seed_lo = lo;
+      g_follow_seed_hi = hi;
+      if (!InstallFollowChainHook()) {
+        SetErr("AUTOPLAY_SEED_FOLLOW follow-chain hook install failed");
         g_shm->status = ST_ERR;
         return;
       }

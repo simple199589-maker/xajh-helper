@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.core.activity_auto import (
+    DEFAULT_ENTRY_CD_S,
     DEFAULT_INSTANCE_ID,
     QIEGAO_INSTANCE_ID,
     ActivityConfig,
@@ -1029,7 +1030,7 @@ class ScheduleTaskRunner:
         team_targets=None,
         team_members: str = "",
         custom_ids: dict | None = None,
-        activity_entry_cd_s: float = 30.0,
+        activity_entry_cd_s: float = DEFAULT_ENTRY_CD_S,
         activity_return_poll_s: float = 15.0,
         hang_settings: dict | None = None,
         team_control_enabled: bool = False,
@@ -1051,7 +1052,7 @@ class ScheduleTaskRunner:
         self._custom_ids = (
             dict(custom_ids or {}) if isinstance(custom_ids, dict) else {}
         )
-        self._activity_entry_cd_s = max(0.0, float(activity_entry_cd_s or 30.0))
+        self._activity_entry_cd_s = max(0.0, float(activity_entry_cd_s or DEFAULT_ENTRY_CD_S))
         self._activity_return_poll_s = max(1.0, float(activity_return_poll_s or 15.0))
         self._hang_settings = dict(hang_settings or {})
         self._team_control_enabled = bool(team_control_enabled)
@@ -2173,7 +2174,7 @@ class ScheduleTaskRunner:
         return self._fly_routine_fuzhou(session, task_id, definition_id, reason=reason)
     def _routine_cooldown(self, task_id: int, definition_id: str, *, reason: str | None = None) -> bool:
         """Wait before advancing to the next daily routine item (also on skip/fail)."""
-        seconds = max(0.0, float(self._activity_entry_cd_s or 30.0))
+        seconds = max(0.0, float(self._activity_entry_cd_s or DEFAULT_ENTRY_CD_S))
         if seconds <= 0.0:
             return True
         label = reason or "日常任务完成"

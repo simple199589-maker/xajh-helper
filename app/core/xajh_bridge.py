@@ -292,16 +292,10 @@ def default_bridge_paths() -> tuple[Path, Path]:
 
     dll: Path | None = None
     for bin_dir in search_dirs:
-        candidate = bin_dir / f"xajh_bridge_{int(BRIDGE_BUILD_ID)}.dll"
+        candidate = bin_dir / "xajh_bridge.dll"
         if candidate.is_file():
             dll = candidate
             break
-    if dll is None:
-        for bin_dir in search_dirs:
-            candidate = bin_dir / "xajh_bridge.dll"
-            if candidate.is_file():
-                dll = candidate
-                break
     if dll is None:
         dll = search_dirs[0] / "xajh_bridge.dll"
     return dll, inj
@@ -346,7 +340,7 @@ def stage_bridge_for_inject(log: LogFn | None = None) -> tuple[Path, Path]:
     # A loaded DLL keeps its exact path mapped until the target process exits.
     # Use a build-specific filename so a newly launched game can always load
     # the current bridge even while an older game still owns the legacy stage.
-    staged_dll = stage / f"xajh_bridge_{int(BRIDGE_BUILD_ID)}.dll"
+    staged_dll = stage / "xajh_bridge.dll"
     staged_inj = stage / "xajh_inject.exe"
 
     def _copy_if_needed(src: Path, dst: Path) -> Path:
@@ -1311,6 +1305,19 @@ class XajhBridge:
         """Run AutoPlayFrame.Btn_Start while bypassing skill/leader rejects."""
         return self.call(
             CMD_AUTOPLAY_START_BYPASS,
+            hwnd=hwnd,
+            timeout_ms=timeout_ms,
+        )
+
+    def autoplay_drive_attack(
+        self,
+        *,
+        hwnd: int | None = None,
+        timeout_ms: int = 3000,
+    ) -> BridgeResult:
+        """UI 线程驱动攻击组件 tick（副本 Alert 粘滞自愈）。@author by ak"""
+        return self.call(
+            CMD_AUTOPLAY_DRIVE_ATTACK,
             hwnd=hwnd,
             timeout_ms=timeout_ms,
         )
@@ -2553,18 +2560,8 @@ def _ensure_bridge_unlocked(
                     time.sleep(0.35)
 
         if healthy:
-            if int(pr.ret or 0) != int(BRIDGE_BUILD_ID):
-                _ENSURE_BRIDGE_FAILURES[int(pid)] = "STALE_BRIDGE_RESTART_GAME"
-                log(
-                    "stale bridge build detected: "
-                    f"loaded={pr.ret!r} required={BRIDGE_BUILD_ID}; "
-                    "restart game required"
-                )
-                try:
-                    existing.close()
-                except Exception:
-                    pass
-                return None
+            # 构建 ID 仅作诊断（pong 上报），不再作为准入拒绝——
+            # 更新同步由 run.bat/启动的内容比对完成（2026-08-30 规范化）。
             if force_reinject:
                 log(
                     "force_reinject ignored for safety; reuse healthy bridge "

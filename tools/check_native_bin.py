@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.native_inventory import NATIVE_BIN_FILES, stamped_bridge_name  # noqa: E402
+from app.core.native_inventory import NATIVE_BIN_FILES  # noqa: E402
 
 MACHINE_I386 = 0x014C
 
@@ -69,7 +69,7 @@ def main(argv: list[str]) -> int:
         print(f"not a directory: {target}", file=sys.stderr)
         return 2
 
-    names = NATIVE_BIN_FILES + (stamped_bridge_name(),)
+    names = NATIVE_BIN_FILES
     missing, empty, bad_arch = [], [], []
     for name in names:
         path = target / name
@@ -84,11 +84,9 @@ def main(argv: list[str]) -> int:
 
     hash_mismatch = False
     generic = target / "xajh_bridge.dll"
-    stamped = target / stamped_bridge_name()
-    if generic.is_file() and stamped.is_file():
-        hash_mismatch = _sha256(generic) != _sha256(stamped)
 
-    if missing or empty or bad_arch or hash_mismatch:
+
+    if missing or empty or bad_arch:
         if missing:
             print(f"missing ({len(missing)}): " + ", ".join(missing), file=sys.stderr)
         if empty:
