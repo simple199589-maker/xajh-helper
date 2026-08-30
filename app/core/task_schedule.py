@@ -1468,6 +1468,43 @@ class ScheduleTaskRunner:
         self._activity = None
         return {"phase": act_ok.get("phase"), "ok": bool(act_ok.get("ok", True))}
 
+    def _notify_claim_activity(self, *, task_id: int = 0, label: str = "") -> None:
+        """群控只做通知：活跃任务收尾发一次 [主P]领活跃。
+
+        领宝箱在各端复用同一本地函数 claim_daily_activity_awards：
+        主控由 ActivityRunner 领取，副控收到通知后直接调用本地领箱函数
+        （ActivityPage.handle_claim_activity_sync）。队内控未开启（本地控）
+        或本窗非主控时不发送。@author by ak
+        """
+        try:
+            from app.core.task_sync import ROLE_MASTER, get_task_sync_hub
+
+            if get_task_sync_hub().get_role(self.pid) != ROLE_MASTER:
+                return
+            if not self._team_control_enabled:
+                return
+            from app.core.team_chat import (
+                ACTION_CLAIM_ACTIVITY,
+                build_master_command,
+                send_team_message,
+            )
+
+            command = build_master_command(ACTION_CLAIM_ACTIVITY, [0])
+            result = send_team_message(self.pid, command, log=self.log)
+            ok = bool(result.get("ok"))
+            self._emit(
+                "claim_activity_sync",
+                "活跃领宝箱已通知副控（队内控）" if ok else "活跃领宝箱队内控通知发送失败",
+                ok=ok,
+                task_id=task_id,
+                label=label,
+                via="team",
+            )
+            if not ok and str(result.get("error") or ""):
+                self.log(f"activity claim notify error: {result.get('error')}")
+        except Exception as exc:
+            self.log(f"activity claim notify failed: {exc}")
+
     # ---- custom execution ----
     def _execute_custom_item(self, session, item) -> str:
         """Execute one custom item; returns 'next' | 'pause' | 'blocked'. @author by ak"""
@@ -1539,6 +1576,9 @@ class ScheduleTaskRunner:
             return "next"
         if res.get("phase") == "paused":
             return "pause"
+        # 主控已领箱（runner 复用本地领箱函数），收尾发一次队内控通知，
+        # 副控收到后直接调用同一本地函数领取；不随每次领箱 pass 重复发送。
+        self._notify_claim_activity(task_id=0, label="活跃")
         points2 = self._read_points(session)
         pts2 = max(0, int(points2)) if points2 is not None else None
         audit2 = custom_audit_activity(pts2, target)

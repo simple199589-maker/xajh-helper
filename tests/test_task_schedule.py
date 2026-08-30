@@ -577,6 +577,130 @@ class TaskScheduleTests(unittest.TestCase):
         runner.resume()
         self.assertEqual(runner.state, RUNNER_STATE_IDLE)
 
+    # ---- activity task end → 队内控 notify once ----
+
+    def _activity_task(self, *, team_control_enabled, hub_role, sends, points=70, target=70):
+        """Run _execute_custom_activity with mocked run/points; return (runner, outcome, run_cfgs, events)."""
+        from app.core import task_sync, team_chat
+
+        events: list = []
+        run_cfgs: list = []
+
+        class _FakeHub:
+            def get_role(self, pid):
+                return hub_role
+
+        def _fake_send(pid, text, log=None, **kwargs):
+            sends.append((pid, text))
+            return {"ok": True}
+
+        runner = ScheduleTaskRunner(
+            pid=1,
+            role_id="900001",
+            team_control_enabled=team_control_enabled,
+            on_event=events.append,
+        )
+        runner._read_points = lambda session: points
+        runner._run_activity = lambda cfg, *, task_id=0, label="": (
+            run_cfgs.append(cfg) or {"phase": "done", "ok": True}
+        )
+        item = {
+            "definition_id": CUSTOM_DEF_ID_ACTIVITY,
+            "kind": "activity",
+            "name": "刷满活跃并领取全部宝箱",
+            "target_points": target,
+            "instance_id": 0,
+        }
+        with _PatchCM(
+            [
+                mock.patch.object(task_sync, "get_task_sync_hub", lambda: _FakeHub()),
+                mock.patch.object(team_chat, "send_team_message", _fake_send),
+            ]
+        ):
+            outcome = runner._execute_custom_activity(object(), item)
+        return runner, outcome, run_cfgs, events
+
+    def test_activity_task_notifies_slaves_once_via_team_chat(self) -> None:
+        from app.core.task_sync import ROLE_MASTER
+
+        sends: list = []
+        runner, outcome, run_cfgs, events = self._activity_task(
+            team_control_enabled=True, hub_role=ROLE_MASTER, sends=sends
+        )
+        self.assertEqual(outcome, "next")
+        # 本端领箱仍走 runner 复用的本地领箱函数（claim_awards 保持开启）。
+        self.assertTrue(run_cfgs[0].claim_awards)
+        # 群控只做通知：整个活跃任务收尾只发一次 [主P]领活跃。
+        self.assertEqual(len(sends), 1)
+        pid, text = sends[0]
+        self.assertEqual(pid, 1)
+        self.assertTrue(text.startswith("[主P]领活跃:0@"))
+        sync_events = [e for e in events if e.get("phase") == "claim_activity_sync"]
+        self.assertEqual(len(sync_events), 1)
+        self.assertTrue(sync_events[0].get("ok"))
+
+    def test_activity_task_notify_skips_when_team_control_off(self) -> None:
+        from app.core.task_sync import ROLE_MASTER
+
+        sends: list = []
+        _, outcome, _, _ = self._activity_task(
+            team_control_enabled=False, hub_role=ROLE_MASTER, sends=sends
+        )
+        self.assertEqual(outcome, "next")
+        self.assertEqual(sends, [])
+
+    def test_activity_task_notify_skips_when_not_master(self) -> None:
+        from app.core.task_sync import ROLE_SLAVE
+
+        sends: list = []
+        _, outcome, _, _ = self._activity_task(
+            team_control_enabled=True, hub_role=ROLE_SLAVE, sends=sends
+        )
+        self.assertEqual(outcome, "next")
+        self.assertEqual(sends, [])
+
+    def test_activity_task_notify_skips_when_paused(self) -> None:
+        from app.core import task_sync, team_chat
+        from app.core.task_sync import ROLE_MASTER
+
+        sends: list = []
+
+        class _FakeHub:
+            def get_role(self, pid):
+                return ROLE_MASTER
+
+        def _fake_send(pid, text, log=None, **kwargs):
+            sends.append((pid, text))
+            return {"ok": True}
+
+        runner = ScheduleTaskRunner(
+            pid=1,
+            role_id="900001",
+            team_control_enabled=True,
+            on_event=lambda ev: None,
+        )
+        runner._read_points = lambda session: 70
+        runner._run_activity = lambda cfg, *, task_id=0, label="": {
+            "phase": "paused",
+            "ok": True,
+        }
+        item = {
+            "definition_id": CUSTOM_DEF_ID_ACTIVITY,
+            "kind": "activity",
+            "name": "刷满活跃并领取全部宝箱",
+            "target_points": 70,
+            "instance_id": 0,
+        }
+        with _PatchCM(
+            [
+                mock.patch.object(task_sync, "get_task_sync_hub", lambda: _FakeHub()),
+                mock.patch.object(team_chat, "send_team_message", _fake_send),
+            ]
+        ):
+            outcome = runner._execute_custom_activity(object(), item)
+        self.assertEqual(outcome, "pause")
+        self.assertEqual(sends, [])
+
     # ---- fast accepted-task / can_finish audit ----
 
     def _row(self, tid: int, finished: bool = False) -> object:
