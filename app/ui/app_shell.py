@@ -2982,6 +2982,14 @@ def main() -> None:
     if not _require_admin_or_exit():
         return
 
+    # 游戏崩溃转储（WER LocalDumps）随启动自动配置；管理员下才生效。
+    try:
+        from app.core.crash_capture import ensure_game_crash_dumps
+
+        ensure_game_crash_dumps()
+    except Exception:
+        pass
+
     scope = instance_scope()
     label = scope_label(scope)
     lock = try_acquire_single_instance()

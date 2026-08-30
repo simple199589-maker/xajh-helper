@@ -388,11 +388,7 @@ def _apply_role_settings(
     out = {"ok": False, "role_id": "", "role_name": "", "error": None, "message": ""}
     try:
         from app.core.account_manager import get_role, normalize_role_id
-        from app.core.hang_settings import (
-            apply_hang_prepare,
-            get_hang_config,
-            start_hang,
-        )
+        from app.core.hang_settings import apply_hang_switch, get_hang_config
         from app.core.loot import open_attach_session
         from app.core.team_ops import read_host_identity
 
@@ -425,19 +421,22 @@ def _apply_role_settings(
         if enable_hang:
             try:
                 cfg = get_hang_config(None, None, char_id=rid)
-                if hang_mode is not None:
-                    cfg.mode = 1 if int(hang_mode) == 1 else 0
                 attach.hwnd = int(hwnd)
-                prepare = apply_hang_prepare(attach, cfg, log=log)
-                if not bool(prepare.get("ok")):
-                    hang_res = {
-                        "ok": False,
-                        "message": str(prepare.get("message") or "挂机参数设置失败"),
-                        "prepare": prepare,
-                    }
-                else:
-                    hang_res = start_hang(attach, cfg, hwnd=hwnd, log=log)
-                    hang_res["prepare"] = prepare
+                # 开关本体统一走 core 唯一管线；hang_mode 作为本次临时模式
+                # 覆盖传入（不写回角色配置），丸子门控由管线负责。
+                hang_res = apply_hang_switch(
+                    attach,
+                    cfg,
+                    True,
+                    hwnd=hwnd,
+                    temporary_mode=(
+                        (1 if int(hang_mode) == 1 else 0)
+                        if hang_mode is not None
+                        else None
+                    ),
+                    source="login",
+                    log=log,
+                )
             except Exception as e:  # pragma: no cover
                 log(f"_apply_role_settings hang err: {e}")
                 hang_res = {"ok": False, "error": str(e)}

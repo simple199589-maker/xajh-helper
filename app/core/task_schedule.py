@@ -1430,6 +1430,10 @@ class ScheduleTaskRunner:
             log=self.log,
             pause_event=pause_ev,
             hang_settings=self._hang_settings,
+            # 卡队召回：副本内队友过远时经队内控/群控通知队员主动跟随主控。
+            slave_follow_notify=lambda: bool(
+                self._sync_routine_slave_follow(task_id, "dungeon")
+            ),
         )
         self._activity = runner
         self._emit(
@@ -1604,8 +1608,7 @@ class ScheduleTaskRunner:
             return False
 
     def _start_routine_hang_local(self, session, task_id: int, definition_id: str) -> bool:
-        from dataclasses import replace
-        from app.core.hang_settings import apply_hang_prepare, get_hang_config, start_hang
+        from app.core.hang_settings import apply_hang_switch, get_hang_config
 
         cfg = get_hang_config(self._hang_settings, char_id=self._role_id or None)
         # 霸刀/龙傲天/余沧海/东方 日常用普通挂机(mode=0)，
@@ -1621,25 +1624,28 @@ class ScheduleTaskRunner:
                 self.log(
                     f"routine dungeon target guard arm failed: {exc}"
                 )
-        normal_cfg = replace(cfg, mode=0)
-        prepare = apply_hang_prepare(session, normal_cfg, log=self.log)
-        if not bool(prepare.get("ok")):
+        # 开关本体统一走 core 唯一管线（temporary_mode=0 仅本次生效，
+        # 含已达目标态时的丸子门控对账），不再自备 prepare+start。
+        result = apply_hang_switch(
+            session,
+            cfg,
+            True,
+            hwnd=self.hwnd,
+            temporary_mode=0,
+            source="routine",
+            log=self.log,
+        )
+        ok = bool(result.get("ok"))
+        if not ok and "switch" not in result:
+            # 管线未走到开关本体（prepare/丸子对账失败）
             self._routine_emit(
                 "routine_blocked",
-                f"正式挂机参数准备失败: {prepare.get('message') or 'unknown'}",
+                f"正式挂机参数准备失败: {result.get('message') or 'unknown'}",
                 task_id,
                 definition_id,
                 ok=False,
             )
             return False
-        result = start_hang(
-            session,
-            normal_cfg,
-            hwnd=self.hwnd,
-            log=self.log,
-        )
-        result["prepare"] = prepare
-        ok = bool(result.get("ok"))
         self._routine_emit(
             "hang_started",
             "普通挂机启动" if ok else "普通挂机启动失败",
@@ -1649,7 +1655,7 @@ class ScheduleTaskRunner:
             ok=ok,
         )
         # 守护进程状态检查：确保 hang guard 正常运行（拾取放弃/维修/活力）。
-        guard = result.get("guard") or {}
+        guard = (result.get("switch") or {}).get("guard") or {}
         if ok and not bool(guard.get("ok", True)):
             self.log(
                 f"routine hang guard not running: {guard.get('error') or 'unknown'} "
@@ -1777,10 +1783,17 @@ class ScheduleTaskRunner:
 
     def _stop_routine_autoplay(self, session, task_id: int, definition_id: str) -> bool:
         try:
-            from app.core.hang_settings import get_hang_config, stop_hang
+            from app.core.hang_settings import apply_hang_switch, get_hang_config
 
             cfg = get_hang_config(self._hang_settings, char_id=self._role_id or None)
-            result = stop_hang(session, cfg, hwnd=self.hwnd, log=self.log)
+            result = apply_hang_switch(
+                session,
+                cfg,
+                False,
+                hwnd=self.hwnd,
+                source="routine",
+                log=self.log,
+            )
             ok = bool(result.get("ok", True)) if isinstance(result, dict) else bool(getattr(result, "ok", True))
             self._routine_emit("autoplay_stopped", "挂机已停止，准备返回福州城" if ok else "停止挂机失败", task_id, definition_id, ok=ok)
             return ok

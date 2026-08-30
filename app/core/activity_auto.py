@@ -5802,6 +5802,7 @@ class DungeonUnstickGuard:
         stop_event: threading.Event | None = None,
         hwnd: int = 0,
         use_bridge: bool = True,
+        slave_follow_notify: Callable[[], bool] | None = None,
     ):
         self.instance_id = int(instance_id or 0)
         self._rule = DUNGEON_UNSTICK_RULES.get(self.instance_id)
@@ -5852,6 +5853,9 @@ class DungeonUnstickGuard:
         self._stuck_last_own: tuple[float, float, float] | None = None
         self._stuck_still_since: float | None = None
         self._stuck_last_toggle: float = 0.0
+        # 卡队召回（通知队员主动跟随主控）：上层注入回调 + ≥60s 节流。
+        self._slave_follow_notify = slave_follow_notify
+        self._recall_last_sent: float = 0.0
 
     # -- geometry helpers ----------------------------------------------------
 
@@ -5908,6 +5912,7 @@ class DungeonUnstickGuard:
         self._entry_reached = False
         self._zone_idx = -1
         self._last_pos = None
+        self._recall_last_sent = 0.0
         self._reset_window()
 
     def has_rule(self) -> bool:
@@ -6069,7 +6074,11 @@ class DungeonUnstickGuard:
     def _follow_keepalive(self, session, pos=None) -> None:
         """组队跟随守护：卡队检测（1928 / 6230）。
 
-        自己停留 > 5s 且 AOI 中有队友 > 15m 时，取消一次跟随重开。
+        自己停留 > 5s 且 AOI 中有队友超过队伍规模阈值（3人=10m，4人=14m，
+        5人=18m，6人=22m）时：
+          - 队长窗口：先经上层通道通知队员主动跟随主控（拉回），
+            再执行带队伍纠偏（组队跟随 + 阶段寻路）。
+          - 非队长窗口：取消跟随重开一次。
         不依赖跟随当前状态，不管开没开都执行。
 
         @author by ak
@@ -6158,45 +6167,191 @@ class DungeonUnstickGuard:
             self._stuck_still_since = None
             return
 
+        # 纠偏移动中不重复处理（不消耗防抖）。
+        if self._moving:
+            return
+
         # 防抖 30s。
         if now - self._stuck_last_toggle < 30.0:
             return
         self._stuck_last_toggle = now
         self._stuck_still_since = None
 
-        from app.core.team_ops import set_team_follow
-
+        is_leader = any(
+            bool(member.get("is_self")) and bool(member.get("is_leader"))
+            for member in party
+        )
         self._emit(
             "dungeon_unstick_move",
-            f"卡队检测：自己停留 {still_dur:.0f}s + 队友>15m，取消跟随重开",
+            f"卡队检测：自己停留 {still_dur:.0f}s + 队友>{far_threshold:.0f}m"
+            f"（{party_size}人队阈值），执行卡队处理",
             ok=True,
         )
-        # 不管跟随当前开没开，先取消再重开。
-        try:
-            set_team_follow(
-                session, enabled=False, use_ui_click=False, log=self._log
-            )
-        except Exception:
-            pass
-        time.sleep(1.0)
-        try:
-            r2 = set_team_follow(
-                session, enabled=True, use_ui_click=False, log=self._log
-            )
-        except Exception:
+
+        if not is_leader:
+            # 非队长窗口：沿用取消跟随重开（发起跟随是队长的职责）。
+            from app.core.team_ops import set_team_follow
+
+            try:
+                set_team_follow(
+                    session, enabled=False, use_ui_click=False, log=self._log
+                )
+            except Exception:
+                pass
+            time.sleep(1.0)
+            try:
+                r2 = set_team_follow(
+                    session, enabled=True, use_ui_click=False, log=self._log
+                )
+            except Exception:
+                return
+            if r2.ok:
+                self._emit(
+                    "dungeon_unstick_move",
+                    "卡队：组队跟随已重新开启",
+                    ok=True,
+                )
+            else:
+                self._emit(
+                    "dungeon_unstick_skip",
+                    f"卡队：重开跟随失败: {r2.message}",
+                    ok=False,
+                )
             return
-        if r2.ok:
-            self._emit(
-                "dungeon_unstick_move",
-                "卡队：组队跟随已重新开启",
-                ok=True,
-            )
-        else:
+
+        # 队长窗口：先拉回队员（队内控通知队员主动跟随主控），
+        # 再带队伍纠偏（组队跟随 + 阶段寻路），纯开关自身跟随拉不回队员。
+        self._notify_slaves_follow(session)
+        self._keepalive_team_correction(session, pos3)
+
+    def _notify_slaves_follow(self, session) -> None:
+        """卡队召回：通知队员主动跟随主控（上层注入回调，≥60s 节流）。
+
+        回调由 runner 注入（自动任务=队内控/群控通道，手动副本=同步总线），
+        副控端执行「指定跟随主控」，等效把远处的队员拉回队长身边。
+
+        @author by ak
+        """
+        fn = self._slave_follow_notify
+        if fn is None:
+            return
+        now = time.monotonic()
+        if now - self._recall_last_sent < 60.0:
+            return
+        self._recall_last_sent = now
+        try:
+            sent = bool(fn())
+        except Exception as e:
+            sent = False
+            self._log(f"dungeon team recall err: {e}")
+        self._emit(
+            "dungeon_team_recall",
+            f"卡队召回：{'已通知队员主动跟随主控' if sent else '召回通知发送失败'}",
+            ok=sent,
+        )
+
+    def _keepalive_team_correction(self, session, pos3) -> None:
+        """卡队守护触发的带队伍纠偏（zone 窗口丢失时的兜底重武装）。
+
+        常规纠偏要求角色停留在卡点 ±2m 内；实际运行中死亡复活/被内挂抢位
+        会把角色漂出窗口（实测 1928 漂出 11.7m），之后纠偏永久失联。此处
+        在「卡队」条件成立时按已到达的阶段卡点直接执行带队伍脱困。
+
+        @author by ak
+        """
+        rule = self._rule
+        if rule is None:
+            return
+        zone_idx = self._resolve_zone(pos3)
+        if zone_idx < 0 and self._entry_reached:
+            # 已过进本默认区但漂出具体卡点半径：退回用最后一个具体卡点。
+            specific = [
+                i for i, z in enumerate(self._zones) if not z.get("from_entry")
+            ]
+            zone_idx = specific[-1] if specific else -1
+        zone = self._zones[zone_idx] if 0 <= zone_idx < len(self._zones) else None
+        if (
+            zone is not None
+            and zone.get("no_monster")
+            and self._has_nearby_monster(session, pos3)
+        ):
             self._emit(
                 "dungeon_unstick_skip",
-                f"卡队：重开跟随失败: {r2.message}",
+                "卡队纠偏：附近有怪，暂不脱困（等怪清完再判）",
+            )
+            return
+        self._moving = True
+        try:
+            arrived = self._dispatch_unstick(session, rule, zone, pos3)
+        except Exception as e:
+            self._emit("dungeon_unstick_error", f"卡队纠偏异常: {e}", ok=False)
+            arrived = False
+        finally:
+            self._moving = False
+        self._cooldown_until = time.monotonic() + (
+            DUNGEON_UNSTICK_COOLDOWN_S
+            if arrived
+            else DUNGEON_UNSTICK_RETRY_COOLDOWN_S
+        )
+        self._reset_window()
+
+    def _initiate_team_follow(self, session) -> bool:
+        """卡位纠偏带队伍：发起组队跟随，让队员随行。失败不阻断本号纠偏。"""
+        try:
+            from app.core.team_ops import set_team_follow
+
+            r = set_team_follow(
+                session, enabled=True, use_ui_click=False, log=self._log
+            )
+        except Exception as e:
+            self._emit(
+                "dungeon_unstick_error",
+                f"卡位纠偏发起组队跟随异常: {e}",
                 ok=False,
             )
+            return False
+        self._emit(
+            "dungeon_unstick_move",
+            (
+                "卡位纠偏：组队跟随已发起，队员随行"
+                if r.ok
+                else f"卡位纠偏：组队跟随发起失败（{r.message}），仅本号纠偏"
+            ),
+            ok=bool(r.ok),
+        )
+        return bool(r.ok)
+
+    def _dispatch_unstick(self, session, rule: dict, zone: dict | None, pos) -> bool:
+        """按卡点分流执行脱困（_trigger 与卡队守护共用）。
+
+        分流：
+          - 带 next_zone（如 1928 第 0 卡点）：持续无伤害时线性走到下一个
+            卡点，走到后交给该卡点逻辑，不再关注本卡点。follow 规则先发起
+            组队跟随，把队伍一起带上。
+          - 卡点带回撤点且规则要求跟随（1928 卡点2）：先线性回撤，再走组队跟随到目标。
+          - 卡点带回撤点但不要求跟随（6230）：线性回撤 + 线性直走到目标。
+          - 无回撤点且规则要求跟随（1928 卡点1）：直接组队跟随到目标。
+          - 其余保留规则：线性直走到目标。
+        """
+        next_pt = None
+        if zone is not None and zone.get("next_zone") is not None:
+            try:
+                next_pt = tuple(self._zones[int(zone["next_zone"])]["stuck"])
+            except Exception:
+                next_pt = None
+        if next_pt is not None:
+            if rule.get("follow"):
+                self._initiate_team_follow(session)
+            return self._run_pathfind_rule(
+                session, rule, zone, pos, tgt_override=next_pt
+            )
+        if zone is not None and zone.get("escape") and rule.get("follow"):
+            return self._run_follow_rule(session, rule, pos, escape=zone.get("escape"))
+        if zone is not None and zone.get("escape"):
+            return self._run_pathfind_rule(session, rule, zone, pos)
+        if rule.get("follow"):
+            return self._run_follow_rule(session, rule, pos)
+        return self._run_pathfind_rule(session, rule, zone, pos)
 
     def tick(self, session, *, scene_id=None, scene_label=None, pos=None) -> None:
         """Low-frequency observation; never blocks the runner loop. @author by ak"""
@@ -6334,35 +6489,8 @@ class DungeonUnstickGuard:
         )
         arrived = False
         try:
-            # 分流：
-            #  - 带 next_zone（如 1928 第 0 卡点）：持续无伤害时线性走到下一个
-            #    卡点，走到后交给该卡点逻辑，不再关注本卡点。
-            #  - 卡点带回撤点且规则要求跟随（1928 卡点2）：先线性回撤，再走组队跟随到目标。
-            #  - 卡点带回撤点但不要求跟随（6230）：线性回撤 + 线性直走到目标。
-            #  - 无回撤点且规则要求跟随（1928 卡点1）：直接组队跟随到目标。
-            #  - 其余保留规则：线性直走到目标。
-            next_pt = None
-            if zone is not None and zone.get("next_zone") is not None:
-                try:
-                    next_pt = tuple(
-                        self._zones[int(zone["next_zone"])]["stuck"]
-                    )
-                except Exception:
-                    next_pt = None
-            if next_pt is not None:
-                arrived = self._run_pathfind_rule(
-                    session, rule, zone, pos, tgt_override=next_pt
-                )
-            elif zone is not None and zone.get("escape") and rule.get("follow"):
-                arrived = self._run_follow_rule(
-                    session, rule, pos, escape=zone.get("escape")
-                )
-            elif zone is not None and zone.get("escape"):
-                arrived = self._run_pathfind_rule(session, rule, zone, pos)
-            elif rule.get("follow"):
-                arrived = self._run_follow_rule(session, rule, pos)
-            else:
-                arrived = self._run_pathfind_rule(session, rule, zone, pos)
+            # 分流细节见 _dispatch_unstick（卡队守护共用同一路径）。
+            arrived = self._dispatch_unstick(session, rule, zone, pos)
         finally:
             self._moving = False
         # 成功(已离开卡点)用长冷却；失败用短冷却，便于阶段性地持续守护抢点重试。
@@ -6778,6 +6906,7 @@ class ActivityRunner:
         on_event: Callable[[ActivityStepEvent], None] | None = None,
         log: LogFn | None = None,
         pause_event: threading.Event | None = None,
+        slave_follow_notify: Callable[[], bool] | None = None,
     ):
         self.pid = int(pid)
         self.hwnd = int(hwnd or 0)
@@ -6789,6 +6918,8 @@ class ActivityRunner:
         self.on_event = on_event or (lambda _e: None)
         self.log = log or (lambda _m: None)
         self._pause_event = pause_event
+        # 卡队召回通道：通知队员主动跟随主控（自动任务=队内控，手动副本=同步总线）。
+        self._slave_follow_notify = slave_follow_notify
         self._lifecycle = RunnerLifecycle(f"xajh-activity-{self.pid}")
         self._stop = self._lifecycle.stop_event
         self._thread: threading.Thread | None = None
@@ -6975,6 +7106,7 @@ class ActivityRunner:
                     stop_event=self._stop,
                     hwnd=int(self.hwnd or 0),
                     use_bridge=bool(getattr(self.cfg, "use_bridge", True)),
+                    slave_follow_notify=self._slave_follow_notify,
                 )
                 self._dungeon_unstick_guard = guard
             else:
@@ -7304,50 +7436,26 @@ class ActivityRunner:
         """
         poll = max(1.0, min(3.0, float(getattr(self.cfg, "return_poll_s", 15.0))))
         emitted = False
-        rearm_attempted = False
-        rearmed_for_revive = False
+        guard_kept = False
         while not self._stop.is_set():
             dead = self._qiegao_host_dead(session, force=not emitted)
             if dead is False:
                 if emitted or self._qiegao_dead_paused:
                     self._emit("afk_hang", "角色已复活，恢复切糕寻路流程", ok=True)
-                if rearmed_for_revive:
-                    self._ensure_hang_off(
-                        session,
-                        reason="复活后恢复寻路关挂机",
-                        force=True,
-                        keep_task_guard=True,
-                    )
                 self._qiegao_dead_paused = False
                 return True
             if dead is True and not emitted:
                 self._emit(
                     "afk_hang",
-                    f"角色死亡，任务守护继续处理拾取，暂停{reason}并等待复活",
+                    f"角色死亡，回避一切动作（不发封包/不寻路/不重启内挂），"
+                    f"暂停{reason}并等待复活",
                     ok=True,
                 )
                 emitted = True
                 self._qiegao_dead_paused = True
-            if dead is True and not rearm_attempted:
-                rearm_attempted = True
-                sid_r, _pos_r, label_r = self._scene_prefer_hub(
-                    session, max_age_s=1.5
-                )
-                if is_dungeon_scene(sid_r, label_r, gate=self.cfg.city_gate):
-                    on = self._read_hang_on(session)
-                    if on is False:
-                        self._emit(
-                            "afk_hang",
-                            "死亡时内挂已中断，任务内重启一次以触发游戏副本复活",
-                            ok=True,
-                        )
-                        rearmed_for_revive = bool(self._ensure_hang_on(session))
-                else:
-                    self._emit(
-                        "afk_hang",
-                        f"死亡状态下未确认仍在副本（{label_r or sid_r}），不重启内挂",
-                        ok=True,
-                    )
+            if dead is True and not guard_kept:
+                guard_kept = True
+                # 守护只做死亡/Roll 状态维护；本流程在复活前不做任何游戏动作。
                 self._ensure_qiegao_task_guard(session)
             try:
                 sid, _pos, label = self._scene_prefer_hub(session, max_age_s=2.5)
@@ -7363,7 +7471,6 @@ class ActivityRunner:
             if not _sleep_interruptible(poll, self._stop):
                 return False
         return False
-
 
     def _qiegao_unstick_nudge(
         self,
@@ -8975,7 +9082,7 @@ class ActivityRunner:
         hang_stopped_for_end = False
         next_repath = 0.0
         remote_cool_until = 0.0
-        death_rearm_attempted = False
+        death_guard_kept = False
         analyzer = None
         if bool(getattr(cfg, "qiegao_analyze_mob_freq", False)):
             try:
@@ -9071,20 +9178,13 @@ class ActivityRunner:
                     if not self._qiegao_dead_paused:
                         self._emit(
                             "afk_hang",
-                            "角色死亡，任务守护继续处理拾取，暂停补发寻路/扫怪并等待复活",
+                            "角色死亡，回避一切动作（不发封包/不补发寻路），等待复活",
                             ok=True,
                         )
                         self._qiegao_dead_paused = True
-                    if not death_rearm_attempted:
-                        death_rearm_attempted = True
-                        on = self._read_hang_on(session)
-                        if on is False and not hang_stopped_for_end:
-                            self._emit(
-                                "afk_hang",
-                                "死亡打断了游戏内挂，任务内重启一次以触发副本复活",
-                                ok=True,
-                            )
-                            self._ensure_hang_on(session)
+                    if not death_guard_kept:
+                        death_guard_kept = True
+                        # 守护只做状态维护；死亡期间不再重启内挂（死人开不了挂）。
                         self._ensure_qiegao_task_guard(session)
                     if not _sleep_interruptible(
                         poll, self._stop
@@ -9092,8 +9192,26 @@ class ActivityRunner:
                         return False
                     continue
                 if dead is False and self._qiegao_dead_paused:
+                    # 复活后先稳定（复活动画/位置回稳），再复核状态。
+                    if not _sleep_interruptible(2.0, self._stop):
+                        return False
+                    if self._qiegao_host_dead(session, force=True) is True:
+                        # 复活未完成/又倒地：回到死亡等待，仍不做任何动作。
+                        continue
                     self._qiegao_dead_paused = False
-                    death_rearm_attempted = False
+                    death_guard_kept = False
+                    # 安全动作：稳定后复核内挂状态，确实不在才重启
+                    #（不是盲目开挂）。
+                    if (
+                        self._read_hang_on(session) is False
+                        and not hang_stopped_for_end
+                    ):
+                        self._emit(
+                            "afk_hang",
+                            "角色已复活且稳定：内挂未在，重启内挂继续切糕站桩",
+                            ok=True,
+                        )
+                        self._ensure_hang_on(session)
                     self._emit(
                         "afk_hang",
                         "角色已复活，恢复挂机补发寻路/扫怪",

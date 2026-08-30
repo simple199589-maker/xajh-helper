@@ -215,6 +215,7 @@ from app.core.hang_settings import (
     WANZI_KIND_NEIGONG,
     WANZI_KIND_WAIGONG,
     apply_hang_prepare,
+    apply_hang_switch,
     format_hang_live_line,
     get_hang_config,
     get_youfeng_key_hook_state,
@@ -225,10 +226,8 @@ from app.core.hang_settings import (
     read_hang_live,
     save_hang_disk_from_config,
     update_hang_guard_config,
-    start_hang,
     start_youfeng_key_hook,
     start_wanzi_packet_manual,
-    stop_hang,
     stop_youfeng_key_hook,
     stop_wanzi_packet_manual,
     sync_role_prefs_to_settings,
@@ -6486,116 +6485,135 @@ class SettingsPage(FeaturePage):
         )
         self._on_ignore_refresh()
 
-    def _on_hang_start(self) -> None:
-        """Start hang off the Tk thread; the guard keeps its attached session."""
+    def apply_hang_switch(
+        self,
+        desired_on: bool,
+        *,
+        temporary_mode: int | None = None,
+        persist: bool = True,
+        source_label: str = "挂机设置",
+        on_done=None,
+    ) -> None:
+        """统一开/关挂机入口（Tk 线程调用）。
+
+        本页按钮与队内控/群控/云控同步、主控内挂同步共用：按钮路径
+        persist=True（先落盘当前控件配置再应用），远端命令路径 persist=False
+        （只用已存角色配置，不落盘、不更新运行中 guard 配置）。temporary_mode
+        仅本次生效，统一由 core 管线 apply_hang_switch 执行（含已达目标态时
+        的丸子门控对账）。on_done(ok, message, out) 在 worker 线程回调，out 为
+        core 管线结果 dict（异常时为 None）。
+        @author by ak
+        """
+        op = "start" if desired_on else "stop"
         if self._hang_busy:
             self.var_hang_status.set("挂机操作进行中…")
+            self.log(f"挂机切换 [{source_label}] 忽略：上一操作进行中")
+            if on_done is not None:
+                try:
+                    on_done(False, "挂机操作进行中")
+                except Exception:
+                    pass
             return
         sess = self._require_session()
         if sess is None:
+            if on_done is not None:
+                try:
+                    on_done(False, "未挂载")
+                except Exception:
+                    pass
             return
-        cfg = self._apply_hang_cfg_to_session()
+        if persist:
+            cfg = self._apply_hang_cfg_to_session()
+        else:
+            try:
+                cid = self._hang_char_id_key()
+            except Exception:
+                cid = ""
+            cfg = get_hang_config(self.settings, char_id=cid or None)
         pid = int(sess.pid)
         hwnd = int(getattr(sess, "hwnd", 0) or 0)
         self._set_hang_busy(True)
-        self.var_hang_status.set("开启挂机中…")
+        self.var_hang_status.set("开启挂机中…" if desired_on else "关闭挂机中…")
 
         def worker() -> None:
             attach = None
             keep_attach = False
+            ok = False
+            msg = ""
+            out = None
             try:
                 from app.core.super_loot import open_attach_session
 
                 attach = open_attach_session(pid, log=lambda m: self._push("log", m))
                 attach.hwnd = int(getattr(attach, "hwnd", 0) or hwnd)
-                # The Hang Settings start button is a save-and-apply command:
-                # persist current widgets above, then set all hang attributes
-                # before it changes the running switch.
-                prepare = apply_hang_prepare(
-                    attach, cfg, log=lambda m: self._push("log", m)
-                )
-                if not bool(prepare.get("ok")):
-                    msg = str(prepare.get("message") or "挂机参数设置失败")
-                    self._push(
-                        "hang_done",
-                        {
-                            "op": "start",
-                            "ok": False,
-                            "line": f"开挂前参数设置失败 · {msg}",
-                            "message": msg,
-                        },
-                    )
-                    return
-                ret = start_hang(
+                out = apply_hang_switch(
                     attach,
                     cfg,
+                    desired_on,
                     hwnd=hwnd,
+                    temporary_mode=temporary_mode,
+                    source=source_label,
                     log=lambda m: self._push("log", m),
                 )
-                ret["prepare"] = prepare
-                ok = bool(ret.get("ok"))
-                msg = str(ret.get("message") or "")
-                try:
-                    st = read_hang_live(attach, log=lambda m: self._push("log", m))
-                    line = format_hang_live_line(st) + f" · {msg}"
-                except Exception:
-                    line = f"{'开挂成功' if ok else '开挂失败'} · {msg}"
-                # The periodic guard closes over this session on success.
-                guard = ret.get("guard")
+                ok = bool(out.get("ok"))
+                msg = str(out.get("message") or "")
+                if bool(out.get("skipped")):
+                    line = msg
+                elif desired_on:
+                    base = str(out.get("live_line")) or ("开挂成功" if ok else "开挂失败")
+                    line = (base + f" · {msg}").strip(" ·")
+                else:
+                    line = f"{'已关挂' if ok else '关挂失败'} · {msg}"
+                # The periodic guard closes over this session on success; a
+                # skipped switch keeps the previous owner, so close ours.
+                guard = (out.get("switch") or {}).get("guard")
                 guard_ok = not isinstance(guard, dict) or bool(guard.get("ok", True))
-                keep_attach = bool(ok and guard_ok)
-                self._push("hang_done", {"op": "start", "ok": ok, "line": line, "message": msg})
+                keep_attach = bool(
+                    desired_on and ok and not out.get("skipped") and guard_ok
+                )
+                self._push(
+                    "hang_done",
+                    {
+                        "op": op,
+                        "ok": ok,
+                        "line": line,
+                        "message": msg,
+                        "source": source_label,
+                    },
+                )
             except Exception as e:
-                self._push("hang_done", {"op": "start", "ok": False, "line": f"开挂异常: {e}", "message": str(e)})
+                self._push(
+                    "hang_done",
+                    {
+                        "op": op,
+                        "ok": False,
+                        "line": f"{'开挂' if desired_on else '关挂'}异常: {e}",
+                        "message": str(e),
+                        "source": source_label,
+                    },
+                )
+                msg = str(e)
             finally:
                 if attach is not None and not keep_attach:
                     try:
                         attach.close()
                     except Exception:
                         pass
-
-        threading.Thread(target=worker, daemon=True, name=f"hang-start-{pid}").start()
-
-    def _on_hang_stop(self) -> None:
-        """Stop hang off the Tk thread so retry/probe delays do not freeze UI."""
-        if self._hang_busy:
-            self.var_hang_status.set("挂机操作进行中…")
-            return
-        sess = self._require_session()
-        if sess is None:
-            return
-        cfg = self._apply_hang_cfg_to_session()
-        pid = int(sess.pid)
-        hwnd = int(getattr(sess, "hwnd", 0) or 0)
-        self._set_hang_busy(True)
-        self.var_hang_status.set("关闭挂机中…")
-
-        def worker() -> None:
-            attach = None
-            try:
-                from app.core.super_loot import open_attach_session
-
-                attach = open_attach_session(pid, log=lambda m: self._push("log", m))
-                attach.hwnd = int(getattr(attach, "hwnd", 0) or hwnd)
-                ret = stop_hang(
-                    attach,
-                    cfg,
-                    hwnd=hwnd,
-                    log=lambda m: self._push("log", m),
-                )
-                ok = bool(ret.get("ok"))
-                msg = str(ret.get("message") or "")
-                self._push("hang_done", {"op": "stop", "ok": ok, "line": f"{'已关挂' if ok else '关挂失败'} · {msg}", "message": msg})
-            except Exception as e:
-                self._push("hang_done", {"op": "stop", "ok": False, "line": f"关挂异常: {e}", "message": str(e)})
-            finally:
-                if attach is not None:
+                if on_done is not None:
                     try:
-                        attach.close()
+                        on_done(ok, msg, out)
                     except Exception:
                         pass
 
-        threading.Thread(target=worker, daemon=True, name=f"hang-stop-{pid}").start()
+        threading.Thread(target=worker, daemon=True, name=f"hang-{op}-{pid}").start()
+
+    def _on_hang_start(self) -> None:
+        """Start hang off the Tk thread; the guard keeps its attached session."""
+        self.apply_hang_switch(True)
+
+    def _on_hang_stop(self) -> None:
+        """Stop hang off the Tk thread so retry/probe delays do not freeze UI."""
+        self.apply_hang_switch(False)
 
     def _on_save(self) -> None:
         """
@@ -6882,7 +6900,7 @@ class SettingsPage(FeaturePage):
                     self.user_log(
                         f"操作：{action if ok else action + '失败'} · {msg}",
                         category=CAT_OP,
-                        source="快捷设置",
+                        source=str(data.get("source") or "快捷设置"),
                     )
                 elif kind == "hang_saved_apply":
                     data = payload if isinstance(payload, dict) else {}
@@ -8932,6 +8950,10 @@ class ActivityPage(FeaturePage):
             hang_settings=dict(self.settings),
             on_event=on_event,
             log=lambda m: self._push("log", m),
+            # 卡队召回：副本内队友过远时经同步总线/队内控通知队员跟随主控。
+            slave_follow_notify=lambda: bool(
+                self._publish_task_sync(ACTION_DAILY_FOLLOW, 0, name="")
+            ),
         )
         self._runner.start()
         self._register_host_runner(self._runner)
@@ -14380,137 +14402,8 @@ class TaskPage(FeaturePage):
             sync_lock = getattr(self, "_hang_sync_lock", None)
             if sync_lock is not None:
                 sync_lock.acquire()
-            try:
-                from app.core.activity_auto import (
-                    format_hang_state,
-                    probe_hang_state_mem,
-                )
-                from app.core.hang_settings import get_hang_config, start_hang, stop_hang
 
-                attach = open_attach_session(
-                    mounted.pid, log=lambda m: self._push("log", m)
-                )
-                st = probe_hang_state_mem(
-                    attach, log=lambda m: self._push("log", m)
-                )
-                self._push("log", f"自动任务 [内挂] probe {format_hang_state(st)}")
-                if not st.ok or st.on is None:
-                    msg = "挂机状态未知，无法同步"
-                    self._push("team_status", msg)
-                    self._push("status", msg)
-                    self._push("log", f"自动任务 [内挂] {msg}")
-                    return
-                cur_on = bool(st.on)
-                desired_on = not cur_on
-                want_s = "开" if desired_on else "关"
-                cur_s = "开" if cur_on else "关"
-                self._push(
-                    "team_status",
-                    f"内挂同步：本号现={cur_s} → 目标={want_s}…",
-                )
-                self._push(
-                    "log",
-                    f"自动任务 [内挂] master cur={cur_s} want={want_s}",
-                )
-                # 只用本角色ID已保存配置开/关；不同步设置。
-                # 会话配置优先（本窗当前保存值），再落到角色磁盘 prefs。
-                cid = ""
-                try:
-                    cid = self._hang_char_id_key()
-                except Exception:
-                    cid = ""
-                cfg = get_hang_config(self.settings, char_id=cid or None)
-                hwnd_i = int(getattr(mounted, "hwnd", 0) or 0)
-                if desired_on:
-                    from dataclasses import replace
-
-                    function_started = False
-                    temporary_mode = 1 if request_dungeon else 0
-                    cfg = replace(cfg, mode=temporary_mode)
-                    prepare = apply_hang_prepare(
-                        attach, cfg, log=lambda m: self._push("log", m)
-                    )
-                    if not prepare.get("ok"):
-                        ret = {
-                            "ok": False,
-                            "message": "挂机参数同步失败: "
-                            + str(prepare.get("message") or "unknown"),
-                        }
-                    else:
-                        action_cfg = (
-                            # respect captain saved cfg.empty_skill - no force
-                            # if request_dungeon and cfg.empty_skill: (removed force per user)
-                            cfg  # captain respects saved no-skill setting
-                        )
-                        ret = start_hang(
-                            attach,
-                            action_cfg,
-                            hwnd=hwnd_i,
-                            log=lambda m: self._push("log", m),
-                        )
-                        function_started = bool(request_dungeon and ret.get("ok") and bool(getattr(cfg, "empty_skill", False)))
-                    self._team_hang_force_started = function_started
-                else:
-                    temporary_mode = None
-                    # captain stop respects cfg (no force)
-                    ret = stop_hang(
-                        attach, cfg, hwnd=hwnd_i, log=lambda m: self._push("log", m)
-                    )
-                    if ret.get("ok"):
-                        self._team_hang_force_started = False
-                ok_m = bool(ret.get("ok"))
-                msg_m = str(ret.get("message") or "")
-                self._push(
-                    "log",
-                    f"自动任务 [内挂] 本号 ok={ok_m} char_id={cid or '-'} {msg_m}",
-                )
-                # 副控保留各自配置，只传本次临时模式覆盖。
-                notified = False
-                if self._control_role() == ROLE_MASTER:
-                    notified = self._publish_task_sync(
-                        ACTION_HANG_SYNC,
-                        1 if desired_on else 0,
-                        name="on" if desired_on else "off",
-                        members=members,
-                        hang_mode=temporary_mode,
-                    )
-                mode_s = ""
-                if desired_on and temporary_mode in (0, 1):
-                    mode_s = "（" + (
-                        "副本模式" if temporary_mode == 1 else "普通模式"
-                    ) + "）"
-                status = (
-                    f"内挂→{want_s}{mode_s} · "
-                    f"本号={'成功' if ok_m else '失败'} {msg_m}"
-                )
-                if self._control_role() == ROLE_MASTER:
-                    status += " · " + ("已通知副控" if notified else "无在线副控")
-                self._push("team_status", status)
-                self._push("status", status)
-                self._push("log", f"自动任务 [内挂] done {status}")
-                try:
-                    self.user_log(
-                        f"操作：内挂同步→{want_s} · 本号={'成功' if ok_m else '失败'}",
-                        category=CAT_CONTROL,
-                        source="自动任务",
-                    )
-                except Exception:
-                    pass
-            except Exception as e:
-                self._push("team_status", f"内挂同步失败: {e}")
-                self._push("status", f"内挂同步失败: {e}")
-                self._push("log", f"自动任务 [内挂] err: {e}")
-            finally:
-                if attach is not None:
-                    try:
-                        attach.close()
-                    except Exception:
-                        pass
-                if sync_lock is not None:
-                    try:
-                        sync_lock.release()
-                    except Exception:
-                        pass
+            def _reset_sync_ui() -> None:
                 self._hang_sync_working = False
 
                 def _re() -> None:
@@ -14525,120 +14418,113 @@ class TaskPage(FeaturePage):
                 except Exception:
                     _re()
 
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _run_hang_sync(
-        self,
-        *,
-        desired_on: bool,
-        from_sync: bool = False,
-        temporary_mode: int | None = None,
-    ) -> None:
-        """
-        Apply hang open/close on this window using local role prefs only.
-
-        Group control never overwrites this role's hang settings.
-
-        @author by ak
-        """
-        mounted = self._require_session()
-        if mounted is None:
-            return
-        want_s = "开" if desired_on else "关"
-        tag = "副控内挂" if from_sync else "内挂"
-
-        def worker() -> None:
-            attach = None
-            sync_lock = getattr(self, "_hang_sync_lock", None)
-            if sync_lock is not None:
-                sync_lock.acquire()
             try:
-                from app.core.activity_auto import probe_hang_state_mem
-                from app.core.hang_settings import get_hang_config, start_hang, stop_hang
+                from app.core.activity_auto import (
+                    format_hang_state,
+                    probe_hang_state_mem,
+                )
 
                 attach = open_attach_session(
                     mounted.pid, log=lambda m: self._push("log", m)
                 )
-                cid = ""
-                try:
-                    cid = self._hang_char_id_key()
-                except Exception:
-                    cid = ""
-                cfg = get_hang_config(self.settings, char_id=cid or None)
-                hwnd_i = int(getattr(mounted, "hwnd", 0) or 0)
-                mode_i = int(temporary_mode) if temporary_mode in (0, 1) else None
-                # Apply local saved attributes plus this command's temporary
-                # mode before probing/skipping. No prefs are written here.
-                if desired_on:
-                    if mode_i is not None:
-                        from dataclasses import replace
-
-                        cfg = replace(cfg, mode=mode_i)
-                    prepare = apply_hang_prepare(
-                        attach, cfg, log=lambda m: self._push("log", m)
-                    )
-                    if not prepare.get("ok"):
-                        msg = "挂机参数同步失败: " + str(
-                            prepare.get("message") or "unknown"
-                        )
-                        self._push("log", f"自动任务 [{tag}] {msg}")
-                        self._push("status", f"{tag}→{want_s} · 失败 {msg}")
-                        return
-                # A mode transition must be applied even when autoplay is already running.
-                try:
-                    st = probe_hang_state_mem(attach, log=lambda m: self._push("log", m))
-                    live_mode = None
-                    try:
-                        live_mode = int(((st.detail or {}).get("mem") or {}).get("mode"))
-                    except (TypeError, ValueError):
-                        live_mode = None
-                    mode_matches = mode_i is None or live_mode is None or live_mode == mode_i
-                    if st.ok and st.on is not None and bool(st.on) == bool(desired_on) and mode_matches:
-                        self._push(
-                            "log",
-                            f"自动任务 [{tag}] already {want_s}, skip "
-                            f"temporary_mode={mode_i}",
-                        )
-                        mode_s = ""
-                        if desired_on and mode_i in (0, 1):
-                            mode_s = "（" + (
-                                "副本模式" if mode_i == 1 else "普通模式"
-                            ) + "）"
-                        self._push(
-                            "status", f"{tag}→{want_s}{mode_s} · 已是目标状态"
-                        )
-                        return
-                except Exception:
-                    pass
-                if desired_on:
-                    ret = start_hang(
-                        attach,
-                        cfg,
-                        hwnd=hwnd_i,
-                        log=lambda m: self._push("log", m),
-                    )
-                else:
-                    ret = stop_hang(
-                        attach, cfg, hwnd=hwnd_i, log=lambda m: self._push("log", m)
-                    )
-                ok = bool(ret.get("ok"))
-                msg = str(ret.get("message") or "")
+                st = probe_hang_state_mem(
+                    attach, log=lambda m: self._push("log", m)
+                )
+                self._push("log", f"自动任务 [内挂] probe {format_hang_state(st)}")
+                if not st.ok or st.on is None:
+                    msg = "挂机状态未知，无法同步"
+                    self._push("team_status", msg)
+                    self._push("status", msg)
+                    self._push("log", f"自动任务 [内挂] {msg}")
+                    _reset_sync_ui()
+                    return
+                cur_on = bool(st.on)
+                desired_on = not cur_on
+                want_s = "开" if desired_on else "关"
+                cur_s = "开" if cur_on else "关"
+                self._push(
+                    "team_status",
+                    f"内挂同步：本号现={cur_s} → 目标={want_s}…",
+                )
                 self._push(
                     "log",
-                    f"自动任务 [{tag}] want={want_s} ok={ok} char_id={cid or '-'} "
-                    f"temporary_mode={mode_i} {msg}",
+                    f"自动任务 [内挂] master cur={cur_s} want={want_s}",
                 )
-                mode_s = ""
-                if desired_on and mode_i in (0, 1):
-                    mode_s = "（" + (
-                        "副本模式" if mode_i == 1 else "普通模式"
-                    ) + "）"
-                self._push(
-                    "status",
-                    f"{tag}→{want_s}{mode_s} · {'成功' if ok else '失败'} {msg}",
+                # 只用本角色ID已保存配置开/关；不同步设置。开关本体统一委托
+                # 挂机设置页能力（apply_hang_switch, persist=False）：
+                # prepare/probe-skip/丸子门控对账都由唯一管线负责。
+                settings_page = self._sibling_page("settings")
+                if settings_page is None or not hasattr(
+                    settings_page, "apply_hang_switch"
+                ):
+                    msg = "挂机设置页不可用，无法同步"
+                    self._push("team_status", msg)
+                    self._push("status", msg)
+                    self._push("log", f"自动任务 [内挂] {msg}")
+                    _reset_sync_ui()
+                    return
+                # 副控保留各自配置，只传本次临时模式覆盖。
+                temporary_mode = (1 if request_dungeon else 0) if desired_on else None
+
+                def _finalize(ok_m, msg_m, out=None) -> None:
+                    cfg_used = (out or {}).get("cfg")
+                    if desired_on:
+                        self._team_hang_force_started = bool(
+                            request_dungeon
+                            and ok_m
+                            and bool(getattr(cfg_used, "empty_skill", False))
+                        )
+                    elif ok_m:
+                        self._team_hang_force_started = False
+                    self._push(
+                        "log",
+                        f"自动任务 [内挂] 本号 ok={bool(ok_m)} {msg_m}",
+                    )
+                    notified = False
+                    if self._control_role() == ROLE_MASTER:
+                        notified = self._publish_task_sync(
+                            ACTION_HANG_SYNC,
+                            1 if desired_on else 0,
+                            name="on" if desired_on else "off",
+                            members=members,
+                            hang_mode=temporary_mode,
+                        )
+                    mode_s = ""
+                    if desired_on and temporary_mode in (0, 1):
+                        mode_s = "（" + (
+                            "副本模式" if temporary_mode == 1 else "普通模式"
+                        ) + "）"
+                    status = (
+                        f"内挂→{want_s}{mode_s} · "
+                        f"本号={'成功' if ok_m else '失败'} {msg_m}"
+                    )
+                    if self._control_role() == ROLE_MASTER:
+                        status += " · " + ("已通知副控" if notified else "无在线副控")
+                    self._push("team_status", status)
+                    self._push("status", status)
+                    self._push("log", f"自动任务 [内挂] done {status}")
+                    try:
+                        self.user_log(
+                            f"操作：内挂同步→{want_s} · 本号={'成功' if ok_m else '失败'}",
+                            category=CAT_CONTROL,
+                            source="自动任务",
+                        )
+                    except Exception:
+                        pass
+                    _reset_sync_ui()
+
+                settings_page.apply_hang_switch(
+                    desired_on,
+                    temporary_mode=temporary_mode,
+                    persist=False,
+                    source_label="内挂",
+                    on_done=_finalize,
                 )
             except Exception as e:
-                self._push("log", f"自动任务 [{tag}] err: {e}")
+                self._push("team_status", f"内挂同步失败: {e}")
+                self._push("status", f"内挂同步失败: {e}")
+                self._push("log", f"自动任务 [内挂] err: {e}")
+                _reset_sync_ui()
             finally:
                 if attach is not None:
                     try:
@@ -14652,6 +14538,61 @@ class TaskPage(FeaturePage):
                         pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _run_hang_sync(
+        self,
+        *,
+        desired_on: bool,
+        from_sync: bool = False,
+        temporary_mode: int | None = None,
+    ) -> None:
+        """
+        Apply hang open/close on this window using local role prefs only.
+
+        Group control never overwrites this role's hang settings. The toggle
+        itself is delegated to the 挂机设置 page capability (apply_hang_switch,
+        persist=False): one pipeline owns prepare / probe-skip / wanzi-gate
+        reconcile, so remote on/off can never leave the wanzi gates down.
+
+        @author by ak
+        """
+        mounted = self._require_session()
+        if mounted is None:
+            return
+        want_s = "开" if desired_on else "关"
+        tag = "副控内挂" if from_sync else "内挂"
+        mode_i = int(temporary_mode) if temporary_mode in (0, 1) else None
+        mode_s = ""
+        if desired_on and mode_i in (0, 1):
+            mode_s = "（" + ("副本模式" if mode_i == 1 else "普通模式") + "）"
+        try:
+            cid = self._hang_char_id_key()
+        except Exception:
+            cid = ""
+        settings_page = self._sibling_page("settings")
+        if settings_page is None or not hasattr(settings_page, "apply_hang_switch"):
+            self._push("log", f"自动任务 [{tag}] 失败：挂机设置页不可用，无法执行开关")
+            self._push("status", f"{tag}→{want_s}{mode_s} · 失败（挂机设置页不可用）")
+            return
+
+        def _report(ok, msg, out=None) -> None:
+            self._push(
+                "log",
+                f"自动任务 [{tag}] want={want_s} ok={bool(ok)} "
+                f"char_id={cid or '-'} temporary_mode={mode_i} {msg}",
+            )
+            self._push(
+                "status",
+                f"{tag}→{want_s}{mode_s} · {'成功' if ok else '失败'} {msg}",
+            )
+
+        settings_page.apply_hang_switch(
+            desired_on,
+            temporary_mode=temporary_mode,
+            persist=False,
+            source_label=tag,
+            on_done=_report,
+        )
 
     def _on_team_auto_form(self) -> None:
         """

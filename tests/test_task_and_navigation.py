@@ -277,8 +277,15 @@ class TaskAndNavigationTests(unittest.TestCase):
         captain_action = inspect.getsource(TaskPage._on_team_hang_sync)
         synced_action = inspect.getsource(TaskPage._run_hang_sync)
 
-        self.assertIn("start_hang(", captain_action)
-        self.assertIn("start_hang(", synced_action)
+        # 统一管线契约：开/关挂机一律委托挂机设置页能力（SettingsPage.
+        # apply_hang_switch → core apply_hang_switch 唯一管线，含丸子门控
+        # 对账），本页不得再自备 start_hang/stop_hang 或 set_autoplay_mode。
+        self.assertIn("apply_hang_switch(", captain_action)
+        self.assertIn("apply_hang_switch(", synced_action)
+        self.assertNotIn("start_hang(", captain_action)
+        self.assertNotIn("start_hang(", synced_action)
+        self.assertNotIn("stop_hang(", captain_action)
+        self.assertNotIn("stop_hang(", synced_action)
         self.assertNotIn("set_autoplay_mode(", captain_action)
         self.assertNotIn("set_autoplay_mode(", synced_action)
 

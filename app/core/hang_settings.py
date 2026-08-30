@@ -33,7 +33,6 @@ from app.core.activity_auto import (
     HOST_DATA_LEAF_OFF,
     HOST_DATA_MID_OFF,
     NOTE_VA_GAME_ROOT_GLOBAL,
-    NOTE_VA_GET_HOST_DATA,
     _note_live_va,
     _rpm_u32,
     _rpm_u8,
@@ -1754,12 +1753,32 @@ _HANG_WANZI_PACKET_LOCK = threading.Lock()
 # briefly creating two packet threads.
 _HANG_WANZI_PACKET_LIFECYCLE_LOCKS: dict[int, threading.RLock] = {}
 _HANG_WANZI_PACKET_HANG_PAUSED: set[int] = set()
+# 开挂封包窗口（发 1500 → 模式/锚点本地写完）临时冻结 hang-owned 丸子发包：
+# raw_c2s 外来线程与游戏封包响应初始化并发，疑似触发游戏 AV（2026-08-30）。
+# 自到期设计，调用方无需配对 resume，也不会影响 _HANG_WANZI_PACKET_HANG_PAUSED
+# 的其他语义（共享手动 owner 暂停等）。
+_HANG_WANZI_PACKET_TRANSITION_UNTIL: dict[int, float] = {}
+_WANZI_TRANSITION_PAUSE_S = 3.0
 _HANG_WANZI_AOI_TOKENS: dict[int, object] = {}
 _HANG_WANZI_AOI_TOKEN_LOCK = threading.Lock()
 # Native dungeon target guard is a one-shot lifecycle lease, not a periodic
 # producer.  Keep ownership in Python so stop/restart can disarm exactly once.
 _DUNGEON_TARGET_GUARD_ARMED: set[int] = set()
+# pid → 武装时同步进原生守卫的忽略怪 TID 名单（放行看门狗的前置门 + 候选过滤）。
+_DUNGEON_TARGET_GUARD_TIDS: dict[int, tuple[int, ...]] = {}
 _DUNGEON_TARGET_GUARD_LOCK = threading.Lock()
+
+
+def get_dungeon_guard_ignore_tids(pid: int) -> tuple[int, ...]:
+    """返回该 pid 武装的忽略怪 TID 名单；未武装返回空（看门狗据此待机）。
+
+    武装前提 = 副本模式 ∧ 「忽略副本卡怪」已勾选 ∧ 名单非空 ∧ 桥接武装成功。
+    放行看门狗以此作为启动前置条件，平时绝不抢目标。
+
+    @author by ak
+    """
+    with _DUNGEON_TARGET_GUARD_LOCK:
+        return _DUNGEON_TARGET_GUARD_TIDS.get(int(pid or 0), ())
 _HANG_WANZI_CONTROL_TOKENS: dict[int, object] = {}
 _HANG_WANZI_CONTROL_TOKEN_LOCK = threading.Lock()
 # Sender-side watchdog bookkeeping only.  The sender never performs RPM: it
@@ -2225,27 +2244,18 @@ def _resolve_host_data_rpm(session: GameAttachSession) -> int:
 
 
 def _resolve_host_data(session: GameAttachSession, *, log: LogFn | None = None) -> int:
-    """Prefer RPM host_data; fallback remote GetHostData only if remote not hung. @author by ak"""
+    """RPM-only host_data read: *(*(GAME_ROOT)+0x24)+0x90. @author by ak
+
+    远程 GetHostData 回退已禁用：该外来线程调用与游戏封包响应初始化并发时
+    会在游戏进程内卡死并 AV（2026-08-30 切糕开挂崩溃 0xC0000005 现场，
+    远程线程永不返回且随后进程退出）。RPM 读不到时返回 0，调用方按
+    "待校准"跳过即可，不再向游戏注入额外线程。
+    """
     log = log or (lambda _m: None)
     hd = _resolve_host_data_rpm(session)
-    if hd:
-        return int(hd)
-    pid = _hang_pid(session)
-    ok_r, err_r = _probe_remote_callable(pid) if pid else (False, "no pid")
-    if not ok_r:
-        log(f"hang host_data: skip remote ({err_r})")
-        return 0
-    try:
-        va = int(_note_live_va(session, NOTE_VA_GET_HOST_DATA) or 0)
-        if not va:
-            return 0
-        return int(remote_call_cdecl_x86(int(session.pid), va, []) or 0) & 0xFFFFFFFF
-    except TimeoutError:
-        log("hang host_data: remote call timeout/busy")
-        return 0
-    except Exception as e:
-        log(f"hang host_data call err: {e}")
-        return 0
+    if not hd:
+        log("hang host_data: rpm miss; remote fallback disabled, keep 0")
+    return int(hd)
 
 
 def probe_party_auto_need_ready(
@@ -4167,12 +4177,43 @@ def _serialize_wanzi_packet_lifecycle(fn):
     return _wrapped
 
 
+def _wanzi_transition_active_locked(pid: int) -> bool:
+    """True while the hang packet-transition wanzi freeze is active (self-expiring)."""
+    pid = int(pid)
+    deadline = _HANG_WANZI_PACKET_TRANSITION_UNTIL.get(pid)
+    if deadline is None:
+        return False
+    if time.monotonic() >= float(deadline):
+        _HANG_WANZI_PACKET_TRANSITION_UNTIL.pop(pid, None)
+        return False
+    return True
+
+
+def _wanzi_pause_for_transition(pid: int) -> None:
+    pid = int(pid or 0)
+    if not pid:
+        return
+    with _HANG_WANZI_PACKET_LOCK:
+        _HANG_WANZI_PACKET_TRANSITION_UNTIL[pid] = (
+            time.monotonic() + _WANZI_TRANSITION_PAUSE_S
+        )
+
+
+def _wanzi_resume_for_transition(pid: int) -> None:
+    pid = int(pid or 0)
+    if not pid:
+        return
+    with _HANG_WANZI_PACKET_LOCK:
+        _HANG_WANZI_PACKET_TRANSITION_UNTIL.pop(pid, None)
+
+
 def _wanzi_shared_can_send(pid: int) -> bool:
     """Read scheduler caches only; repair missing producers without doing RPM."""
     pid = int(pid)
     with _HANG_WANZI_PACKET_LOCK:
         owners = set(_HANG_WANZI_PACKET_OWNERS.get(pid) or ())
         hang_paused = pid in _HANG_WANZI_PACKET_HANG_PAUSED
+        transition_paused = _wanzi_transition_active_locked(pid)
         runner = _HANG_WANZI_PACKET_RUNNERS.get(pid)
         runner_log = getattr(runner, "_log", None) if runner is not None else None
     if not owners:
@@ -4210,7 +4251,7 @@ def _wanzi_shared_can_send(pid: int) -> bool:
     if not control_fresh or not wanzi_control_can_send(pid):
         return False
     if WANZI_PACKET_OWNER_HANG in owners:
-        if hang_paused:
+        if hang_paused or transition_paused:
             return WANZI_PACKET_OWNER_MANUAL in owners
         return wanzi_aoi_can_send(pid)
     return WANZI_PACKET_OWNER_MANUAL in owners
@@ -5850,6 +5891,106 @@ def stop_hang(
     )
 
 
+def apply_hang_switch(
+    session: GameAttachSession,
+    cfg: HangConfig,
+    desired_on: bool,
+    *,
+    hwnd: int = 0,
+    temporary_mode: int | None = None,
+    source: str | None = None,
+    log: LogFn | None = None,
+) -> dict:
+    """唯一开/关挂机管线：挂机设置页、队内控/群控/云控同步、日常 routine、
+    登录编排都必须走这里，禁止各自再组 prepare+start/stop 逻辑。
+
+    temporary_mode 仅本次调用生效（内存 replace），绝不写回配置或磁盘。
+    已处于目标状态时走快速路径，但必须对账丸子门控（on→幂等重启/挂靠，
+    off→确保停止）：否则主控 on/off 抖动后丸子门控会长期缺席。
+    @author by ak
+    """
+    log = log or (lambda _m: None)
+    mode_i = int(temporary_mode) if temporary_mode in (0, 1) else None
+    if mode_i is not None:
+        cfg = replace(cfg, mode=mode_i)
+    want_s = "开" if desired_on else "关"
+    mode_s = ""
+    if desired_on and mode_i in (0, 1):
+        mode_s = "（" + ("副本模式" if mode_i == 1 else "普通模式") + "）"
+    out: dict = {
+        "ok": False,
+        "skipped": False,
+        "desired_on": bool(desired_on),
+        "temporary_mode": mode_i,
+        "cfg": cfg,
+        "message": "",
+    }
+
+    if desired_on:
+        prepare = apply_hang_prepare(session, cfg, log=log)
+        out["prepare"] = prepare
+        if not prepare.get("ok"):
+            msg = str(prepare.get("message") or "挂机参数设置失败")
+            out["message"] = f"挂机参数设置失败 · {msg}"
+            log(f"hang switch: {out['message']}")
+            return out
+
+    # Probe fast path: already in the desired state (+ mode match).
+    try:
+        st = probe_hang_state_mem(session, log=log)
+    except Exception as exc:
+        st = None
+        log(f"hang switch: probe err {exc}")
+    if st is not None and st.ok and st.on is not None and bool(st.on) == desired_on:
+        live_mode = None
+        try:
+            live_mode = int(((st.detail or {}).get("mem") or {}).get("mode"))
+        except (TypeError, ValueError):
+            live_mode = None
+        mode_matches = mode_i is None or live_mode is None or live_mode == mode_i
+        if mode_matches:
+            if desired_on:
+                wz = start_wanzi_packet_hang(session, cfg, log=log)
+                out["wanzi"] = wz
+                if not wz.get("ok"):
+                    out["message"] = "已开启，但丸子门控对账失败: " + str(
+                        wz.get("message") or "unknown"
+                    )
+                    log(f"hang switch: {out['message']}")
+                    return out
+                detail = str(wz.get("message") or "").strip()
+                out["ok"] = True
+                out["skipped"] = True
+                out["message"] = f"已是开启状态{mode_s}" + (f" · {detail}" if detail else "")
+            else:
+                out["wanzi"] = stop_wanzi_packet_hang(session, release=True, log=log)
+                out["ok"] = True
+                out["skipped"] = True
+                out["message"] = "已是关闭状态"
+            log(f"hang switch: want={want_s} skipped · {out['message']}")
+            return out
+
+    ret = (
+        start_hang(session, cfg, hwnd=hwnd, source=source, log=log)
+        if desired_on
+        else stop_hang(session, cfg, hwnd=hwnd, source=source, log=log)
+    )
+    out["switch"] = ret
+    out["ok"] = bool(ret.get("ok"))
+    out["message"] = str(ret.get("message") or "")
+    try:
+        live = read_hang_live(session, log=log)
+        out["live"] = live.to_dict()
+        out["live_line"] = format_hang_live_line(live)
+    except Exception as exc:
+        log(f"hang switch: live probe err {exc}")
+    log(
+        f"hang switch: want={want_s} ok={out['ok']} skipped={out['skipped']} "
+        f"temporary_mode={mode_i} {out['message']}"
+    )
+    return out
+
+
 def _stop_hang_force_unlocked(
     session: GameAttachSession,
     cfg: HangConfig,
@@ -6149,6 +6290,7 @@ def _arm_dungeon_target_guard(
             }
         with _DUNGEON_TARGET_GUARD_LOCK:
             _DUNGEON_TARGET_GUARD_ARMED.add(pid)
+            _DUNGEON_TARGET_GUARD_TIDS[pid] = tuple(int(t) & 0xFFFFFFFF for t in rules)
         log("dungeon target guard: armed (packaged/per-role TID, AOI distance, 30m fence)")
         return {"ok": True, "enabled": True, "note": result.note}
     except Exception as exc:
@@ -6195,6 +6337,7 @@ def _disarm_dungeon_target_guard(
             }
         with _DUNGEON_TARGET_GUARD_LOCK:
             _DUNGEON_TARGET_GUARD_ARMED.discard(pid)
+            _DUNGEON_TARGET_GUARD_TIDS.pop(pid, None)
         log("dungeon target guard: disarmed")
         return {"ok": True, "enabled": False, "note": result.note}
     except Exception as exc:
@@ -6400,18 +6543,25 @@ def _start_hang_unlocked(
             )
             log(f"hang start: {out['message']}")
             return out
+        # 封包发送前先把 CECAutoPlay 模式写到目标值：状态机按目标模式启动，
+        # 不要等启动到一半（封包响应初始化中）再改模式。
+        try:
+            from app.core.activity_auto import set_autoplay_mode as _set_mode_pre
+
+            if not bool(
+                _set_mode_pre(session, int(cfg.mode), log=log).get("ok")
+            ):
+                log("hang start: pre-packet mode set failed (continuing)")
+        except Exception as e:
+            log(f"hang start: pre-packet mode set err {e}")
         # 副本模式：封包发送前先本地直调 StartAutoPlay 初始化状态机。
         # 背景：仅靠封包时，服务器响应 + seed follow 的初始化在"队长身份
         # 开挂"场景下跟随快照指向自己，机器会停在 StateAlert 不打怪；
         # 本地直调把机器直接置入 StateAttack（可战斗态），目标由守护里的
         # 放行看门狗补齐。锚点 NaN 由开挂确认后的 anchor repair 兜底。
         if dungeon_mode:
-            from app.core.activity_auto import (
-                set_autoplay_mode as _set_mode_local,
-                start_autoplay_force,
-            )
+            from app.core.activity_auto import start_autoplay_force
 
-            _set_mode_local(session, int(cfg.mode), log=log)
             force_ret = start_autoplay_force(
                 session, send_packet=False, log=log
             )
@@ -6423,6 +6573,9 @@ def _start_hang_unlocked(
                 )
                 log(f"hang start: {out['message']}")
                 return out
+        # 开挂封包窗口冻结 hang-owned 丸子发包：raw_c2s 外来线程与游戏
+        # 封包响应初始化并发，见 _resolve_host_data 注释（2026-08-30 崩溃）。
+        _wanzi_pause_for_transition(_hang_pid(session))
         ret = _send_hang_control_packet(
             session, HANG_START_PACKET, action="开启", log=log
         )
@@ -6491,7 +6644,9 @@ def _start_hang_unlocked(
         log(f"hang start: post-start reapply err {_me}")
     # 修复锚点：封包响应处理器设置的锚点可能在坐标未稳定时写入 NaN。
     # 挂机已确认 running，bridge 坐标可靠，补写正确锚点。
-    if out.get("ok") and dungeon_mode:
+    # 普通/副本模式都补：普通模式开挂同样会继承上一轮残留锚点（可能相距
+    # 几十米或为 NaN），不给游戏状态机留垃圾数据。
+    if out.get("ok"):
         try:
             from app.core.xajh_bridge import ensure_bridge
             from app.core.activity_auto import _wpm_f32, resolve_cec_autoplay_rpm
@@ -6524,6 +6679,7 @@ def _start_hang_unlocked(
                         pass
         except Exception as e:
             log(f"hang start: anchor repair err {e}")
+    _wanzi_resume_for_transition(_hang_pid(session))
     # 副本跳过剧情、武尊自动开怪 不再在开挂时立即调用，
     # 统一由 hang guard 在场景稳定后按需触发（首次+切换）。
     if out.get("ok"):
@@ -7776,9 +7932,10 @@ def start_hang_guard(
 
         n_pending = len(pending or [])
 
-        # 副本站街"放行攻击"看门狗：多开互等目标死锁时，经原生提交入口
-        # 放行 AOI 内最近的怪（≤30m）。纯 RPM 读 + 单次远端调用，自带
-        # 站街窗口/冷却/内挂 running 门控；异常绝不影响守护主流程。
+        # 副本"忽略怪放行"看门狗（卡怪专用）：仅当「忽略副本卡怪」已武装
+        # 且 AOI 内存在名单忽略怪时，才提交该忽略怪（≤30m）。忽略怪不在场
+        # 时待机，绝不抢目标干扰正常挂机/跟随。纯 RPM 读 + 单次远端调用，
+        # 自带站街窗口/冷却/内挂 running 门控；异常绝不影响守护主流程。
         if dungeon_mode:
             try:
                 from app.core.dungeon_fight_kick import maybe_kick
@@ -7992,6 +8149,7 @@ __all__ = [
     "schedule_skip_dungeon_story_async",
     "prepare_youfeng_hang",
     "apply_hang_prepare",
+    "apply_hang_switch",
     "YOUFENG_HOOK_OWNER_HANG",
     "YOUFENG_HOOK_OWNER_MANUAL",
     "get_youfeng_key_hook_state",

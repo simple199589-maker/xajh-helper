@@ -2707,6 +2707,134 @@ class DungeonSceneGateTests(unittest.TestCase):
         self.assertEqual(reason, "scene_unstable")
 
 
+class ApplyHangSwitchTests(unittest.TestCase):
+    """apply_hang_switch 唯一开/关管线：快速路径必须对账丸子门控。"""
+
+    def test_skip_on_reconciles_wanzi_gate_and_skips_start(self) -> None:
+        from types import SimpleNamespace
+
+        from app.core import hang_settings as hs
+
+        cfg = HangConfig(mode=0)
+        st = SimpleNamespace(ok=True, on=True, detail={"mem": {"mode": 0}})
+        with patch.object(
+            hs, "apply_hang_prepare", return_value={"ok": True}
+        ) as prep, patch.object(
+            hs, "probe_hang_state_mem", return_value=st
+        ), patch.object(
+            hs,
+            "start_wanzi_packet_hang",
+            return_value={"ok": True, "message": "丸子共享直发已运行，已登记挂机 owner"},
+        ) as wz, patch.object(
+            hs, "start_hang"
+        ) as start_mock:
+            out = hs.apply_hang_switch(object(), cfg, True)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["skipped"])
+        self.assertIn("已是开启状态", out["message"])
+        self.assertIn("丸子", out["message"])
+        start_mock.assert_not_called()
+        prep.assert_called_once()
+        wz.assert_called_once()
+        self.assertEqual(cfg.mode, 0)
+
+    def test_skip_off_stops_wanzi_and_skips_stop(self) -> None:
+        from types import SimpleNamespace
+
+        from app.core import hang_settings as hs
+
+        st = SimpleNamespace(ok=True, on=False, detail={"mem": {"mode": 0}})
+        with patch.object(
+            hs, "probe_hang_state_mem", return_value=st
+        ), patch.object(
+            hs, "stop_wanzi_packet_hang", return_value={"ok": True}
+        ) as wz, patch.object(
+            hs, "stop_hang"
+        ) as stop_mock:
+            out = hs.apply_hang_switch(object(), HangConfig(mode=0), False)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["skipped"])
+        self.assertIn("已是关闭状态", out["message"])
+        stop_mock.assert_not_called()
+        wz.assert_called_once()
+
+    def test_mode_mismatch_does_not_skip(self) -> None:
+        from types import SimpleNamespace
+
+        from app.core import hang_settings as hs
+
+        cfg = HangConfig(mode=0)
+        st = SimpleNamespace(ok=True, on=True, detail={"mem": {"mode": 0}})
+        with patch.object(
+            hs, "apply_hang_prepare", return_value={"ok": True}
+        ), patch.object(
+            hs, "probe_hang_state_mem", return_value=st
+        ), patch.object(
+            hs, "start_wanzi_packet_hang", return_value={"ok": True}
+        ), patch.object(
+            hs,
+            "start_hang",
+            return_value={"ok": True, "message": "开启挂机封包已发送"},
+        ) as start_mock, patch.object(
+            hs,
+            "read_hang_live",
+            return_value=SimpleNamespace(to_dict=lambda: {"running": True}),
+        ), patch.object(
+            hs, "format_hang_live_line", return_value="run=True"
+        ):
+            out = hs.apply_hang_switch(object(), cfg, True, temporary_mode=1)
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["skipped"])
+        start_mock.assert_called_once()
+        # temporary_mode 只作用于本次生效 cfg（replace 副本），不改写入参
+        self.assertEqual(cfg.mode, 0)
+        self.assertEqual(out["cfg"].mode, 1)
+
+    def test_start_when_off_runs_full_pipeline(self) -> None:
+        from types import SimpleNamespace
+
+        from app.core import hang_settings as hs
+
+        st = SimpleNamespace(ok=True, on=False, detail={"mem": {"mode": 0}})
+        with patch.object(
+            hs, "apply_hang_prepare", return_value={"ok": True}
+        ) as prep, patch.object(
+            hs, "probe_hang_state_mem", return_value=st
+        ), patch.object(
+            hs,
+            "start_hang",
+            return_value={"ok": True, "message": "开启挂机封包已发送"},
+        ) as start_mock, patch.object(
+            hs,
+            "read_hang_live",
+            return_value=SimpleNamespace(to_dict=lambda: {"running": True}),
+        ), patch.object(
+            hs, "format_hang_live_line", return_value="run=True"
+        ):
+            out = hs.apply_hang_switch(
+                object(), HangConfig(mode=1), True, temporary_mode=1, source="test"
+            )
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["skipped"])
+        self.assertEqual(out["live_line"], "run=True")
+        prep.assert_called_once()
+        start_mock.assert_called_once()
+
+    def test_prepare_failure_short_circuits_before_probe(self) -> None:
+        from app.core import hang_settings as hs
+
+        with patch.object(
+            hs, "apply_hang_prepare", return_value={"ok": False, "message": "场景门拦截"}
+        ), patch.object(
+            hs, "probe_hang_state_mem"
+        ) as probe_mock, patch.object(hs, "start_hang") as start_mock:
+            out = hs.apply_hang_switch(object(), HangConfig(), True)
+        self.assertFalse(out["ok"])
+        self.assertIn("挂机参数设置失败", out["message"])
+        probe_mock.assert_not_called()
+        start_mock.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

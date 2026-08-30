@@ -96,6 +96,116 @@ def native_game_crash_path(pid: int) -> Path:
     return _error_path()
 
 
+# WER LocalDumps for the game exe — auto-configured at startup so a game
+# crash (0xC0000005 etc.) leaves a dmp beside the helper for triage.
+_GAME_DUMP_EXE = "xajh.exe"
+_wer_dump_dir_state: str = ""
+
+
+def game_dump_dir() -> Path:
+    """WER LocalDumps target dir beside the helper (runtime/crashdumps). @author by ak"""
+    try:
+        from common.paths import ensure_writable_dir
+
+        return ensure_writable_dir("runtime", "crashdumps")
+    except Exception:
+        pass
+    try:
+        from common.paths import app_root
+
+        d = app_root() / "runtime" / "crashdumps"
+    except Exception:
+        d = Path(sys.executable).resolve().parent / "runtime" / "crashdumps"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _log_dump_setup(log: Any, msg: str) -> None:
+    """One-line ensure result into diag log + optional caller logger. @author by ak"""
+    line = f"GAME_CRASH_DUMPS {msg} exe={_GAME_DUMP_EXE}"
+    try:
+        from app.core import diag_log
+
+        diag_log.write(line, level="INFO", tag="CRASH")
+    except Exception:
+        pass
+    if callable(log):
+        try:
+            log(line)
+        except Exception:
+            pass
+
+
+def ensure_game_crash_dumps(log: Any = None) -> str:
+    """
+    Auto-enable WER LocalDumps for the game exe; idempotent, never raises.
+
+    写 HKLM ...\\LocalDumps\\xajh.exe（DumpType=1 minidump，够定位出错
+    模块+偏移，体积小便于用户回传）。游戏崩溃后 WER 自动在 game_dump_dir()
+    留 dmp。需管理员写 HKLM；值已一致则跳过；32 位 Python 也必须带
+    KEY_WOW64_64KEY，否则被 WOW64 重定向到 WOW6432Node 导致 WER 读不到。
+
+    @author by ak
+    """
+    global _wer_dump_dir_state
+    if sys.platform != "win32":
+        return "skipped:non-win32"
+    want_folder = str(game_dump_dir())
+    want_type = 1
+    want_count = 5
+    try:
+        import winreg
+
+        subkey = (
+            r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+            "\\" + _GAME_DUMP_EXE
+        )
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                subkey,
+                0,
+                winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY,
+            ) as k:
+                cur_folder = str(winreg.QueryValueEx(k, "DumpFolder")[0])
+                cur_type = int(winreg.QueryValueEx(k, "DumpType")[0])
+                cur_count = int(winreg.QueryValueEx(k, "DumpCount")[0])
+            if (
+                cur_folder.rstrip("\\").lower()
+                == want_folder.rstrip("\\").lower()
+                and cur_type == want_type
+                and cur_count == want_count
+            ):
+                _wer_dump_dir_state = want_folder
+                msg = f"ok(current) dir={want_folder}"
+                _log_dump_setup(log, msg)
+                return msg
+        except FileNotFoundError:
+            pass  # key/values missing — create below
+        with winreg.CreateKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            subkey,
+            0,
+            winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY,
+        ) as k:
+            winreg.SetValueEx(
+                k, "DumpFolder", 0, winreg.REG_EXPAND_SZ, want_folder
+            )
+            winreg.SetValueEx(k, "DumpType", 0, winreg.REG_DWORD, want_type)
+            winreg.SetValueEx(k, "DumpCount", 0, winreg.REG_DWORD, want_count)
+        _wer_dump_dir_state = want_folder
+        msg = f"ok dir={want_folder} type=minidump count={want_count}"
+    except PermissionError:
+        msg = "skipped:not_admin"
+    except Exception as e:
+        msg = f"failed:{e}"
+    _log_dump_setup(log, msg)
+    return msg
+
+
 def describe_exit_code(code: int | None) -> str:
     """Human-readable NTSTATUS / Win32 exit code. @author by ak"""
     if code is None:
@@ -378,6 +488,7 @@ def report_game_crash(
         f"bridge_ctx={ctx!r}\n"
         f"helper_pid={os.getpid()}\n"
         f"error_log={_error_path()}\n"
+        f"game_dump_dir={_wer_dump_dir_state or '(wer localdumps 未配置)'}\n"
     )
     if extra:
         block += f"extra={extra}\n"
