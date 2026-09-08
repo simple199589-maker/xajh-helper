@@ -170,6 +170,7 @@ from app.core.task_schedule import (
     CUSTOM_STATUS_UNCHEKED,
     DEFAULT_SCHEDULE_HOUR,
     DEFAULT_SCHEDULE_MINUTE,
+    DEFAULT_SCENE_SETTLE_S,
     RUNNER_STATE_BLOCKED,
     RUNNER_STATE_COMPLETED,
     RUNNER_STATE_PAUSED,
@@ -185,6 +186,7 @@ from app.core.task_schedule import (
     custom_definition_label,
     custom_queue_item,
     get_schedule_hm,
+    get_schedule_scene_settle_s,
     list_custom_definitions,
     load_role_schedule_profile,
     load_schedule_queue,
@@ -198,6 +200,7 @@ from app.core.task_schedule import (
     save_schedule_queue,
     schedule_profile_should_fire,
     set_schedule_hm,
+    set_schedule_scene_settle_s,
     try_add_task_to_queue,
 )
 from app.core.hang_settings import (
@@ -3942,6 +3945,24 @@ class SettingsPage(FeaturePage):
         ttk.Label(row_sched, text="分  执行", style="Panel.Muted.TLabel").pack(
             side=tk.LEFT
         )
+        _settle_s = get_schedule_scene_settle_s(self.settings)
+        self.var_sched_settle = tk.StringVar(
+            value=str(int(_settle_s)) if float(_settle_s).is_integer() else str(_settle_s)
+        )
+        ttk.Label(row_sched, text="过图时间", style="Panel.Muted.TLabel").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+        ttk.Spinbox(
+            row_sched,
+            from_=0,
+            to=600,
+            increment=5,
+            width=4,
+            textvariable=self.var_sched_settle,
+        ).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(
+            row_sched, text=f"秒（空/0=默认{int(DEFAULT_SCENE_SETTLE_S)}）", style="Panel.Muted.TLabel"
+        ).pack(side=tk.LEFT)
 
         # ---- 忽略设置（黑名单：按 tid 存储，锁定即取消光标）----
         box_ig = section(body, "忽略设置")
@@ -6693,6 +6714,10 @@ class SettingsPage(FeaturePage):
         except Exception:
             sm = DEFAULT_SCHEDULE_MINUTE
         set_schedule_hm(self.settings, sh, sm)
+        if getattr(self, "var_sched_settle", None) is not None:
+            set_schedule_scene_settle_s(
+                self.settings, (self.var_sched_settle.get() or "").strip()
+            )
         if getattr(self, "var_sched_enabled", None) is not None:
             self.settings[SETTING_SCHEDULE_ENABLED] = bool(self.var_sched_enabled.get())
         # Fix this character as the plan owner (captain) and persist per-role.

@@ -53,9 +53,8 @@ section("2. 开挂链")
 hs = read("app/core/hang_settings.py")
 check("场景门等待先于本地初始化",
       0 < hs.find("wait_pid_scene_stable", hs.find("# 副本模式：封包发送前先本地直调"))
-          < hs.find("start_autoplay_force(", hs.find("# 副本模式：封包发送前先本地直调")))
-check("本地 StartAutoPlay 初始化已恢复", "start_autoplay_force(\n                session, send_packet=False" in hs
-      or "start_autoplay_force(session, send_packet=False" in hs)
+          < hs.find("start_autoplay_force_follow(", hs.find("# 副本模式：封包发送前先本地直调")))
+check("本地 StartAutoPlay 初始化已恢复", "start_autoplay_force_follow(" in hs)
 check("开启封包 1500 保留", "HANG_START_PACKET = bytes.fromhex(\"1500\")" in hs)
 check("seed follow 调用点（hang_settings/activity_auto）",
       "autoplay_seed_follow" in hs or "autoplay_seed_follow" in read("app/core/activity_auto.py"))
@@ -65,6 +64,8 @@ check("关闭恢复序列（重开再关 ×2）", "重发开启→关闭恢复�
 # ---------- 3. 守护 tick 接线 ----------
 section("3. 守护 tick 接线")
 check("过图 rearm 重初始化（tick 驱动重试）", "scene rearm autoplay re-init" in hs or "scene rearm re-init" in hs)
+check("过图 rearm 使用统一攻击/跟随武装入口", "start_autoplay_force_follow(" in hs)
+check("过图 rearm 强制重建状态机", "force=True" in hs[hs.find("if scene_rearm_due:"):hs.find("# Plot skip is event-driven only")])
 check("重试上限常量", "_SCENE_REARM_RETRY_MAX" in hs)
 check("重试计数定义", "_HANG_GUARD_REARM_RETRY" in hs)
 check("换图清零重试计数", hs.count("_HANG_GUARD_REARM_RETRY.pop(pid, None)") >= 2)

@@ -180,6 +180,9 @@ DUNGEON_UNSTICK_RULES: dict[int, dict] = {
 }
 # 卡点半径（水平距离，米）。
 DUNGEON_UNSTICK_RADIUS_M = 2.0
+# 纠偏“到位”统一使用实测水平距离；阶段推进和线性寻路必须共用该值。
+# 不能出现寻路按 4m 判成功、进本阶段仍按 2m 判未到的半成功状态。
+DUNGEON_UNSTICK_ARRIVE_RADIUS_M = 4.0
 # 静止判定：连续静默多少秒后触发纠偏。
 DUNGEON_UNSTICK_STILL_S = 6.0
 # 水平移动复位阈值：位移超过该值即视为活动，重置静默窗口。
@@ -3997,6 +4000,7 @@ def start_autoplay_force_follow(
     *,
     hwnd: int = 0,
     settle_s: float = 1.5,
+    force: bool = False,
     log: LogFn | None = None,
 ) -> dict:
     """Function-start autoplay and repair a captain's dungeon follow target.
@@ -4052,7 +4056,12 @@ def start_autoplay_force_follow(
             out["error"] = f"读取副本跟随目标失败: {e}"
             return out
 
-    started = start_autoplay_force(session, send_packet=False, log=log)
+    if force:
+        started = start_autoplay_force(
+            session, send_packet=False, force=True, log=log
+        )
+    else:
+        started = start_autoplay_force(session, send_packet=False, log=log)
     out["start"] = started
     out["after_running"] = started.get("after_running")
     if not bool(started.get("ok")):
@@ -5894,6 +5903,18 @@ class DungeonUnstickGuard:
             if dist is not None and dist <= radius:
                 return idx
         if self._entry_reached:
+            # 下一卡点的阶段状态也承认同一个“实测到位”半径。否则
+            # 线性寻路在 4m 内返回成功后，下一 tick 会因 2m 卡点窗口
+            # 未命中而 rearm，导致反复走同一目标。
+            for idx, zone in enumerate(self._zones):
+                if zone.get("from_entry"):
+                    continue
+                radius = float(
+                    zone.get("arrival_radius", DUNGEON_UNSTICK_ARRIVE_RADIUS_M)
+                )
+                dist = self._hz(pos3, zone.get("stuck"))
+                if dist is not None and dist <= radius:
+                    return idx
             return -1
         for idx, zone in enumerate(self._zones):
             if zone.get("from_entry"):
@@ -5912,7 +5933,7 @@ class DungeonUnstickGuard:
             except Exception:
                 continue
             dist = self._hz(pos3, next_pt)
-            if dist is not None and dist <= DUNGEON_UNSTICK_RADIUS_M:
+            if dist is not None and dist <= DUNGEON_UNSTICK_ARRIVE_RADIUS_M:
                 self._entry_reached = True
                 return
 
@@ -6390,8 +6411,15 @@ class DungeonUnstickGuard:
         self._maybe_mark_entry_reached(pos3)
         zone_idx = self._resolve_zone(pos3)
         if zone_idx < 0:
-            # 不在任何卡点：窗口 + 冷却复位（re-arm）。
-            self._rearm(scene_id=sid)
+            if self._entry_reached:
+                # 已经通过进本阶段后，离开具体卡点是正常路线推进，
+                # 不能把状态重置回 from_entry，否则终点站街又会重复走
+                # 第一段纠偏。切图会在上面的 scene-change 分支单独 rearm。
+                self._reset_window(combat=None)
+                self._last_scene_id = sid if sid is not None else self._last_scene_id
+            else:
+                # 尚未到达进本阶段且不在可识别卡点：窗口 + 冷却复位。
+                self._rearm(scene_id=sid)
             return
         if zone_idx != self._zone_idx:
             # 从上一个卡点区进入新的卡点区：重新累计。
@@ -6579,8 +6607,8 @@ class DungeonUnstickGuard:
         step_m = 8.0
         reissue_dist = 3.0  # 距当前航点 ≤ 3m 视为本段走完
         # 到位判定：进入目标 near_r 内不再重发航点，连续采样稳定即视为已到。
-        arrive_r = 2.5
-        near_r = 4.0
+        arrive_r = float(DUNGEON_UNSTICK_ARRIVE_RADIUS_M)
+        near_r = arrive_r
         poll = 0.3
         stagnant_max = 4
         deadline = time.monotonic() + max(0.5, float(timeout_s))

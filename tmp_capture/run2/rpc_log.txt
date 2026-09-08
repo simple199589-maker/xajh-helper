@@ -1,0 +1,43 @@
+====================================================================================================
+connection: 192.168.0.3:53082 <-> 139.155.250.49:7798
+  S-> msg1 id=0x41 len=    80       | pxSystemService  GetServerTimeResponse
+  S-> msg1 id=0x42 len=   827       | pxSystemService  GetQueryParamObjectResponse  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam
+  S-> msg1 id=0x43 len=   827       | pxSystemService  GetQueryParamObjectResponse  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam
+  S-> msg1 id=0x44 len=  6331 zlib! | pxQueryService  ExecuteQueryResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datDateTime  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  POSTDATE  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x45 len=    75       | pxBillService  PrevBillIdResponse
+  S-> msg1 id=0x46 len=  5829 zlib! | pxBillService  GetBillDataResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  ID_  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x47 len=  2775       | pxBillService  GetBillGoodsInfoResponse  GoodsBaseInfo  长白萝卜  GoodsBaseInfo  云南油麦菜泡沫箱一件净重50斤  GoodsBaseInfo  米粮猕猴桃大果毛重52斤左右，皮重6斤  GoodsBaseInfo  红香酥梨中果B级[程军卫]毛重27斤士1斤，皮3斤
+        more: GoodsBaseInfo  水洗小葱(L)一件净重26斤  GoodsBaseInfo  云南生菜泡沫箱一件净重38斤  GoodsBaseInfo  云南水白菜泡沫箱一件净重48斤  GoodsBaseInfo  鹿茸菇5斤泡沫箱  GoodsBaseInfo  J%  湖北糖梨大果毛重45斤（正负1斤），皮重6斤  GoodsBaseInfo  特价菠萝苦瓜(欧小东)每件净重24斤(土0.5斤)  GoodsBaseInfo
+  S-> msg1 id=0x48 len=   852 zlib! | DataAbstractService  GetDataResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  ID_  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x49 len=  2052 zlib! | pxLookupService  GetBaseGoodsByClassIdResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  goods_id  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x4a len=  6368 zlib! | pxLookupService  GetBaseGoodsByNameResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  goods_id  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x4b len=    80       | pxSystemService  GetServerTimeResponse
+  S-> msg1 id=0x4c len=    80       | pxSystemService  GetServerTimeResponse
+  S-> msg1 id=0x4d len=   852 zlib! | DataAbstractService  GetDataResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  ID_  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x4e len=  6368 zlib! | pxLookupService  GetBaseGoodsByNameResponse  Alignment  taLeftJustify  BlobType  dabtUnknown  BusinessClassID  Calculated  False  CustomAttributes
+        more: DataType  datLargeInt  DecimalPrecision  DecimalScale  DefaultValue  Description  DictionaryEntry  DisplayFormat  DisplayLabel  goods_id  DisplayWidth  EditFormat  EditMask  Expression
+  S-> msg1 id=0x4f len=    80       | pxSystemService  GetServerTimeResponse
+  S-> msg1 id=0x50 len=    80       | pxSystemService  GetServerTimeResponse
+  C-> msg1 id=0x41 len=    64       | pxSystemService  GetServerTime
+  C-> msg1 id=0x42 len=    74       | pxSystemService  GetQueryParamObject
+  C-> msg1 id=0x43 len=    74       | pxSystemService  GetQueryParamObject
+  C-> msg1 id=0x44 len=   867       | pxQueryService  ExecuteQuery  BillSearch  pxQueryParam  A.BILLDATE  '2026-08-01'  '2026-08-31'  pxQueryParam  pxQueryParam  pxQueryParam
+        more: pxQueryParam  pxQueryParam  pxQueryParam  pxQueryParam
+  C-> msg1 id=0x45 len=    79       | pxBillService  PrevBillId  Purchase
+  C-> msg1 id=0x46 len=   141       | pxBillService  GetBillData  BILL  BILLDETAIL  BillExtra  SEQUENCEDETAIL  BILLPAYMENT
+  C-> msg1 id=0x47 len=    73       | pxBillService  GetBillGoodsInfo
+  C-> msg1 id=0x48 len=   122       | pxBaseInfoService  GetData  GOODSCLASS  TableRequestInfo
+  C-> msg1 id=0x49 len=    92       | pxLookupService  GetBaseGoodsByClassId
+  C-> msg1 id=0x4a len=    89       | pxLookupService  GetBaseGoodsByName
+  C-> msg1 id=0x4b len=    64       | pxSystemService  GetServerTime
+  C-> msg1 id=0x4c len=    64       | pxSystemService  GetServerTime
+  C-> msg1 id=0x4d len=   122       | pxBaseInfoService  GetData  GOODSCLASS  TableRequestInfo
+  C-> msg1 id=0x4e len=    89       | pxLookupService  GetBaseGoodsByName
+  C-> msg1 id=0x4f len=    64       | pxSystemService  GetServerTime
+  C-> msg1 id=0x50 len=    64       | pxSystemService  GetServerTime

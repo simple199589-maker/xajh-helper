@@ -14,30 +14,29 @@ class HangLootPacingTests(unittest.TestCase):
         hs._HANG_LOG_THROTTLE.clear()
         hs._HANG_LOOT_DECISIONS.clear()
 
-    def test_packet_hang_skips_native_follow_seed_for_member(self) -> None:
+    def test_function_start_skips_native_follow_seed_for_member(self) -> None:
+        from app.core import activity_auto as aa
+
         sess = MagicMock(pid=4301, hwnd=0x6791)
-        bridge = MagicMock()
-        members = [
-            {"name": "队长", "obj_id": 1001, "is_self": False, "is_leader": True},
-            {"name": "队员", "obj_id": 2002, "is_self": True, "is_leader": False},
-        ]
-        with patch(
+        members = [{"name": "队长", "obj_id": 1001, "is_self": False, "is_leader": True}]
+        with patch.object(
+            aa,
+            "resolve_cec_autoplay_rpm",
+            return_value={"ok": True, "running": False, "mode": 1},
+        ), patch(
             "app.core.plg_ui.host_team_role",
             return_value={"role": "member", "is_leader": False},
         ), patch(
             "app.core.team_ops.read_cecteam_members", return_value=members
-        ), patch(
-            "app.core.xajh_bridge.ensure_bridge", return_value=bridge
-        ):
-            out = hs._seed_dungeon_follow_target(
-                sess, hs.HangConfig(mode=hs.AUTOPLAY_MODE_DUNGEON), settle_s=1.0
-            )
+        ), patch.object(
+            aa, "start_autoplay_force", return_value={"ok": True, "after_running": True}
+        ) as direct:
+            out = aa.start_autoplay_force_follow(sess, settle_s=1.0)
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["team_role"], "member")
         self.assertIsNone(out["follow_target_id"])
-        bridge.autoplay_seed_follow.assert_not_called()
-        bridge.close.assert_not_called()
+        direct.assert_called_once_with(sess, send_packet=False, log=ANY)
 
     def test_send_does_not_reread_result(self) -> None:
         """Abandon path: packets only; no post-wave pending re-read. @author by ak"""

@@ -59,9 +59,11 @@ SETTING_QUEUE = "task_schedule_queue"
 SETTING_HOUR = "task_schedule_hour"
 SETTING_MINUTE = "task_schedule_minute"
 SETTING_LAST_RUN = "task_schedule_last_run_date"
+SETTING_SCENE_SETTLE_S = "task_schedule_scene_settle_s"
 
 DEFAULT_SCHEDULE_HOUR = 10
 DEFAULT_SCHEDULE_MINUTE = 0
+DEFAULT_SCENE_SETTLE_S = 30.0
 
 # Ordered keyword rules: first match wins.
 # mode_hint: dungeon | qiegao
@@ -285,6 +287,30 @@ def set_schedule_hm(settings: dict | None, hour: int, minute: int) -> tuple[int,
     s[SETTING_HOUR] = h
     s[SETTING_MINUTE] = m
     return h, m
+
+
+def get_schedule_scene_settle_s(settings: dict | None) -> float:
+    """过图后统一等待秒数；未填写/非法/<=0 回落默认（30s）。"""
+    s = settings if isinstance(settings, dict) else {}
+    try:
+        value = float(s.get(SETTING_SCENE_SETTLE_S))
+    except (TypeError, ValueError):
+        return DEFAULT_SCENE_SETTLE_S
+    if value <= 0:
+        return DEFAULT_SCENE_SETTLE_S
+    return value
+
+
+def set_schedule_scene_settle_s(settings: dict | None, seconds: float) -> float:
+    s = settings if isinstance(settings, dict) else {}
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        value = DEFAULT_SCENE_SETTLE_S
+    if value <= 0:
+        value = DEFAULT_SCENE_SETTLE_S
+    s[SETTING_SCENE_SETTLE_S] = value
+    return value
 
 
 def schedule_should_fire(settings: dict | None, *, now: datetime | None = None) -> bool:
@@ -1929,13 +1955,13 @@ class ScheduleTaskRunner:
 
     def _wait_routine_post_scene_settle(self, task_id: int, definition_id: str) -> bool:
         """等队友 AOI 到位：固定等待，因为无法预知他人网速/过图速度。"""
-        seconds = 10.0
+        seconds = get_schedule_scene_settle_s(self._hang_settings)
         try:
             if self._team_control_enabled:
                 from app.core.team_chat import send_team_message
 
-                send_team_message(self.pid, f"过图完成，任务#{task_id}统一等待10秒后判断AOI", log=self.log)
-            self._routine_emit("scene_settle_wait", "主控过图稳定，统一等待10秒后判断AOI", task_id, definition_id, seconds=seconds)
+                send_team_message(self.pid, f"过图完成，任务#{task_id}统一等待{int(seconds)}秒后判断AOI", log=self.log)
+            self._routine_emit("scene_settle_wait", f"主控过图稳定，统一等待{int(seconds)}秒后判断AOI", task_id, definition_id, seconds=seconds)
             return interruptible_sleep(seconds, self._stop)
         except Exception as exc:
             self.log(f"daily routine scene settle wait failed: {exc}")
@@ -2399,7 +2425,7 @@ class ScheduleTaskRunner:
             scene_id = target_scene_from_definition or 72
             if not self._wait_routine_post_scene_settle(task_id, definition_id):
                 return "blocked"
-            if not self._wait_routine_party_aoi(session, timeout_s=10.0):
+            if not self._wait_routine_party_aoi(session, timeout_s=30.0):
                 return self._finish_routine_after_party_timeout(session, task_id, definition_id)
             self._routine_emit("scene_stable", f"scene={scene_id} AOI 到齐，保持组队跟随，开始读取 resident", task_id, definition_id, scene_id=scene_id)
         else:
@@ -2964,8 +2990,10 @@ __all__ = [
     "SETTING_HOUR",
     "SETTING_MINUTE",
     "SETTING_LAST_RUN",
+    "SETTING_SCENE_SETTLE_S",
     "DEFAULT_SCHEDULE_HOUR",
     "DEFAULT_SCHEDULE_MINUTE",
+    "DEFAULT_SCENE_SETTLE_S",
     "resolve_instance_for_task",
     "normalize_queue_item",
     "load_schedule_queue",
@@ -2973,6 +3001,8 @@ __all__ = [
     "queue_item_label",
     "get_schedule_hm",
     "set_schedule_hm",
+    "get_schedule_scene_settle_s",
+    "set_schedule_scene_settle_s",
     "schedule_should_fire",
     "mark_schedule_fired",
     "try_add_task_to_queue",

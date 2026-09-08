@@ -9,6 +9,7 @@ from app.core.activity_auto import (
     ActivityConfig,
     ActivityRunner,
     DUNGEON_UNSTICK_RULES,
+    DUNGEON_UNSTICK_ARRIVE_RADIUS_M,
     DUNGEON_UNSTICK_STILL_S,
     DungeonUnstickGuard,
 )
@@ -17,6 +18,16 @@ from app.core.activity_auto import (
 class DungeonUnstickRuleTest(unittest.TestCase):
     def test_all_dungeon_corrections_trigger_after_six_seconds(self) -> None:
         self.assertEqual(DUNGEON_UNSTICK_STILL_S, 6.0)
+
+    def test_arrival_radius_is_shared_by_entry_and_path_logic(self) -> None:
+        self.assertEqual(DUNGEON_UNSTICK_ARRIVE_RADIUS_M, 4.0)
+        guard = DungeonUnstickGuard(instance_id=1928)
+        guard._entry_reached = False
+        guard._maybe_mark_entry_reached((-45.9, 67.0, -19.0))
+        self.assertTrue(guard._entry_reached)
+        # 3m is outside the old 2m threshold but inside the shared 4m
+        # measured-arrival threshold; it must resolve as the next card point.
+        self.assertEqual(guard._resolve_zone((-45.9, 67.0, -19.0)), 1)
 
     def test_retained_dungeon_corrections_are_active(self) -> None:
         self.assertEqual(set(DUNGEON_UNSTICK_RULES), {1928, 2638, 6230})

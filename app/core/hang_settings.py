@@ -253,6 +253,9 @@ HANG_GUARD_TICK_S = 1.0  # roll empty poll tick
 HANG_PLOT_SKIP_COOLDOWN_S = 0.80
 HANG_PLOT_SKIP_BURST = 3
 HANG_PLOT_SKIP_DELAY_S = 1.2  # after hang start / scene settle
+# 过图 rearm 必须等地图业务稳定后再做；给游戏状态机一个短暂的 settle
+# 窗，避免把旧图/自引用快照重新写回队长窗口。
+HANG_DUNGEON_REARM_DELAY_S = 2.5
 HANG_SCENE_WAIT_DEFAULT_S = 4.0
 HANG_SCENE_WAIT_WANZI_S = 6.0
 # After map change, re-arm wanzi once scene is stable again.
@@ -5749,96 +5752,6 @@ def send_hang_stop_packet(
     )
 
 
-def _seed_dungeon_follow_target(
-    session: GameAttachSession,
-    cfg: HangConfig,
-    *,
-    hwnd: int = 0,
-    settle_s: float = 1.5,
-    log: LogFn | None = None,
-) -> dict:
-    """Initialize the native dungeon follow target after packet start."""
-    log = log or (lambda _m: None)
-    if int(getattr(cfg, "mode", 0) or 0) != 1:
-        return {"ok": True, "skipped": True, "reason": "not_dungeon"}
-    out: dict = {
-        "ok": True,
-        "follow_target_id": None,
-        "follow_target_name": None,
-        "team_role": None,
-    }
-    try:
-        from app.core.plg_ui import host_team_role
-        from app.core.team_ops import read_cecteam_members
-
-        role = host_team_role(session, log=lambda _m: None) or {}
-        out["team_role"] = str(role.get("role") or "unknown")
-        members = read_cecteam_members(session, log=lambda _m: None)
-        is_leader = role.get("role") == "leader" or role.get("is_leader") is True
-        if not is_leader:
-            return out
-        target = next(
-            (
-                item
-                for item in members
-                if not bool(item.get("is_self"))
-                and int(item.get("obj_id") or 0) > 0
-            ),
-            None,
-        )
-        if target is None:
-            out["ok"] = False
-            out["error"] = "副本模式未找到可跟随队员"
-            log(out["error"])
-            return out
-        target_id = int(target.get("obj_id") or 0)
-        out["follow_target_id"] = target_id
-        out["follow_target_name"] = str(target.get("name") or "")
-
-        from app.core.xajh_bridge import ensure_bridge
-
-        bridge = ensure_bridge(
-            int(getattr(session, "pid", 0) or 0),
-            log=log,
-            inject_if_needed=True,
-            hwnd=int(hwnd or getattr(session, "hwnd", 0) or 0) or None,
-        )
-        if bridge is None:
-            out["ok"] = False
-            out["error"] = "副本跟随桥接未就绪"
-            return out
-        try:
-            seeded = None
-            deadline = time.monotonic() + max(0.5, min(3.0, float(settle_s)))
-            while time.monotonic() < deadline:
-                seeded = bridge.autoplay_seed_follow(
-                    target_id,
-                    hwnd=int(hwnd or getattr(session, "hwnd", 0) or 0) or None,
-                    timeout_ms=4000,
-                )
-                if seeded.ok:
-                    break
-                error = str(seeded.error or seeded.note or "")
-                if "snapshot unavailable" not in error.lower():
-                    break
-                time.sleep(0.15)
-            out["follow_seed"] = seeded.to_dict() if seeded is not None else {"ok": False}
-            if seeded is None or not seeded.ok:
-                out["ok"] = False
-                out["error"] = str(
-                    getattr(seeded, "error", None)
-                    or getattr(seeded, "note", None)
-                    or "副本模式跟随目标初始化失败"
-                )
-        finally:
-            bridge.close()
-    except Exception as exc:
-        out["ok"] = False
-        out["error"] = f"副本模式跟随目标初始化失败: {exc}"
-        log(out["error"])
-    return out
-
-
 def stop_hang(
     session: GameAttachSession,
     cfg: HangConfig | None = None,
@@ -6418,20 +6331,6 @@ def start_hang(
     force_path = False
 
     def _with_tips(ret: dict) -> dict:
-        if ret.get("ok") and not ret.get("skipped") and int(getattr(cfg, "mode", 0) or 0) == 1:
-            try:
-                ret["follow"] = _seed_dungeon_follow_target(
-                    session, cfg, hwnd=hwnd, settle_s=settle_s, log=log
-                )
-                if not bool(ret["follow"].get("ok")):
-                    ret["ok"] = False
-                    ret["message"] = str(
-                        ret["follow"].get("error") or "副本跟随目标初始化失败"
-                    )
-            except Exception as exc:
-                ret["ok"] = False
-                ret["message"] = f"副本跟随目标初始化异常: {exc}"
-                log(ret["message"])
         if ret.get("ok") and not ret.get("skipped"):
             yf = prestarted_youfeng or start_youfeng_hang(
                 session, cfg, hwnd=hwnd, log=log
@@ -6595,10 +6494,18 @@ def _start_hang_unlocked(
                 )
             except Exception as e:
                 log(f"hang start: scene gate wait 超时，仍尝试本地初始化: {str(e)[:60]}")
-            from app.core.activity_auto import start_autoplay_force
+            from app.core.activity_auto import start_autoplay_force_follow
 
-            force_ret = start_autoplay_force(
-                session, send_packet=False, log=log
+            force_ret = start_autoplay_force_follow(
+                session,
+                hwnd=hwnd_i,
+                settle_s=settle_s,
+                log=log,
+            )
+            log(
+                "hang start: dungeon attack arm "
+                f"ok={force_ret.get('ok')} "
+                f"follow={force_ret.get('follow_target_name') or '-'}"
             )
         # 开挂封包窗口冻结 hang-owned 丸子发包：raw_c2s 外来线程与游戏
         # 封包响应初始化并发，见 _resolve_host_data 注释（2026-08-30 崩溃）。
@@ -7065,6 +6972,7 @@ _PLOT_SKIP_ASYNC_LOCK = threading.Lock()
 _PLOT_SKIP_ASYNC_GEN: dict[int, int] = {}
 _HANG_GUARD_LAST_SCENE: dict[int, int] = {}
 _HANG_GUARD_SCENE_REARM: set[int] = set()
+_HANG_GUARD_SCENE_REARM_AFTER: dict[int, float] = {}
 _HANG_GUARD_REARM_RETRY: dict[int, int] = {}
 # 过图后本地重初始化的重试上限（守护 tick 1s 节奏下 ≈ 5s）
 _SCENE_REARM_RETRY_MAX = 5
@@ -7719,6 +7627,7 @@ def start_hang_guard(
         _HANG_GUARD_LAST_SCENE.pop(pid, None)
         # 标记首次场景检查：第一个稳定 tick 触发副本跳过剧情 / 武尊开怪等
         _HANG_GUARD_SCENE_REARM.add(pid)
+        _HANG_GUARD_SCENE_REARM_AFTER.pop(pid, None)
         _HANG_GUARD_REARM_RETRY.pop(pid, None)
         if startup_maintain:
             _HANG_GUARD_STARTUP_MAINTAIN.add(pid)
@@ -7763,6 +7672,12 @@ def start_hang_guard(
                 prev_sid = int(_HANG_GUARD_LAST_SCENE.get(pid) or 0)
                 if scene_id_now > 0 and prev_sid > 0 and scene_id_now != prev_sid:
                     _HANG_GUARD_SCENE_REARM.add(pid)
+                    if dungeon_mode:
+                        _HANG_GUARD_SCENE_REARM_AFTER[pid] = (
+                            time.monotonic() + HANG_DUNGEON_REARM_DELAY_S
+                        )
+                    else:
+                        _HANG_GUARD_SCENE_REARM_AFTER.pop(pid, None)
                     _HANG_GUARD_REARM_RETRY.pop(pid, None)
                     scene_rearm_due = True
                     log(
@@ -7794,6 +7709,10 @@ def start_hang_guard(
 
         # After map change settles: optional plot skip + wanzi re-prepare.
         if scene_rearm_due:
+            with _HANG_GUARD_CFG_LOCK:
+                rearm_after = float(_HANG_GUARD_SCENE_REARM_AFTER.get(pid) or 0.0)
+            if rearm_after and time.monotonic() < rearm_after:
+                return
             # 过图重入洞（事件驱动，无长阻塞）：每 tick 尝试一次本地
             # StartAutoPlay 重初始化——场景门未 settle 时毫秒级失败，
             # 下个 tick 自然重试；成功（running 保持 True）才入队出清。
@@ -7810,11 +7729,15 @@ def start_hang_guard(
                     try:
                         from app.core.activity_auto import (
                             resolve_cec_autoplay_rpm,
-                            start_autoplay_force,
+                            start_autoplay_force_follow,
                         )
 
-                        r = start_autoplay_force(
-                            guard_session, send_packet=False, force=True, log=log
+                        r = start_autoplay_force_follow(
+                            guard_session,
+                            hwnd=int(getattr(guard_session, "hwnd", 0) or 0),
+                            settle_s=0.5,
+                            force=True,
+                            log=log,
                         )
                         mem2 = resolve_cec_autoplay_rpm(guard_session)
                         rearm_ok = (
@@ -7899,6 +7822,7 @@ def start_hang_guard(
                     # rearm 未就绪则保留标记，下个 tick 继续重试（见上方注释）。
                     if not rearm_pending:
                         _HANG_GUARD_SCENE_REARM.discard(pid)
+                        _HANG_GUARD_SCENE_REARM_AFTER.pop(pid, None)
                 try:
                     from app.core.dungeon_fight_kick import reset_state
 
@@ -8084,6 +8008,7 @@ def stop_hang_guard(
         _HANG_GUARD_TOKEN.pop(int(pid), None)
         _HANG_GUARD_LAST_SCENE.pop(int(pid), None)
         _HANG_GUARD_SCENE_REARM.discard(int(pid))
+        _HANG_GUARD_SCENE_REARM_AFTER.pop(int(pid), None)
         guard_session = _HANG_GUARD_SESSION.pop(int(pid), None)
         guard_owned = int(pid) in _HANG_GUARD_SESSION_OWNED
         _HANG_GUARD_SESSION_OWNED.discard(int(pid))
